@@ -9,6 +9,18 @@ import eduprint
 import batch_check
 
 class RegressionTests(unittest.TestCase):
+    def test_plot_timeout_preserves_diagnostic_output(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            failure = subprocess.TimeoutExpired('accoreconsole', 1,
+                output='[MARK-PLOT-DONE] waiting for confirmation'.encode('utf-16-le'))
+            with patch.object(eduprint.subprocess, 'run', side_effect=failure):
+                code, log = eduprint._plot('dummy', root / 'a.dwg', root, root / 'a.pdf', 1)
+            self.assertEqual(code, 124)
+            self.assertIn('[MARK-PLOT-DONE]', log)
+            self.assertIn('waiting for confirmation', log)
+
     def test_print_collection_excludes_attach_and_products(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

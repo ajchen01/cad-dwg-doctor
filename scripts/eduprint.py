@@ -188,7 +188,7 @@ def _plot(acc: str, dwg: Path, work: Path, pdf: Path, timeout: int) -> tuple[int
         '(setvar "CMDDIA" 0)\n'
         f'(vl-cmdf "_.-plot" "N" "" "" "DWG To PDF.pc3" "{pdf.as_posix()}" "N" "Y")\n'
         '(princ "\\n[MARK-PLOT-DONE]")\n'
-        '(vl-cmdf "_.QUIT")\n',
+        '(vl-cmdf "_.QUIT" "_Y")\n',
         encoding="ascii",
     )
     env = dict(os.environ)
@@ -198,8 +198,10 @@ def _plot(acc: str, dwg: Path, work: Path, pdf: Path, timeout: int) -> tuple[int
             [acc, "/i", str(dwg), "/s", str(scr)],
             cwd=str(work), capture_output=True, timeout=timeout, env=env,
         )
-    except subprocess.TimeoutExpired:
-        return 124, "打印超时"
+    except subprocess.TimeoutExpired as exc:
+        partial = (exc.stdout or b"").decode("utf-16-le", "replace")
+        partial += (exc.stderr or b"").decode("utf-16-le", "replace")
+        return 124, "打印超时\n" + partial
     log = p.stdout.decode("utf-16-le", "ignore")
     return p.returncode, log
 
@@ -249,10 +251,11 @@ def check_one(acc: str, dwg: Path, outdir: Path, dpi: int, timeout: int,
         return res
     pdf = work / "out.pdf"
     rc, log = _plot(acc, staged, work, pdf, timeout)
-    (work / "plot.log").write_text(log, encoding="utf-8")
+    (work / "session-plot.log").write_text(log, encoding="utf-8")
     res["rc"] = rc
     if rc != 0 or not pdf.is_file():
-        res["fatal"] = "未生成 PDF（打印失败）"
+        res["fatal"] = (f"打印会话失败或超时（退出码 {rc}），未作判定" if rc != 0
+                        else "未生成 PDF（打印失败）")
         res["log_tail"] = "\n".join(log.splitlines()[-6:])
         return res
 

@@ -2,9 +2,9 @@
 
 **别人给的 DWG，先让它过一遍。**
 
-> 当前版本：`v0.1.0-beta.1`。常规体检、修复和清理已通过 AutoCAD 2020 合成样本验收；教育版识别和清戳为实验功能。完整验证范围见 [发布验收报告](docs/RELEASE-READINESS.md)。
+> 当前版本：`v0.1.0-beta.2`。常规体检、修复和清理已通过 AutoCAD 2020 合成样本验收；教育版清戳已通过公开对照及三实体合成样本验收，并经用户目视确认；工程图、参照和多布局仍为实验范围。完整验证范围见 [发布验收报告](docs/RELEASE-READINESS.md)。
 >
-> [下载 GitHub 预发布版](https://github.com/ajchen01/cad-dwg-doctor/releases/tag/v0.1.0-beta.1)。解压 ZIP 后，将 `cad-dwg-doctor` 文件夹放入宿主技能目录。
+> [下载 GitHub 预发布版](https://github.com/ajchen01/cad-dwg-doctor/releases/tag/v0.1.0-beta.2)。解压 ZIP 后，将 `cad-dwg-doctor` 文件夹放入宿主技能目录。
 
 体检 → 修复 → 清理 → 去教育版戳。全程无头调用 AutoCAD 的 `accoreconsole`，不弹界面、不用点鼠标，可以塞进批处理里对着一整个目录跑。
 
@@ -236,3 +236,6 @@ DXF 往返会把天正 / 探索者的自定义对象降级成**代理块**，T20
 若宿主沙箱临时目录无法被 AutoCAD 访问，请在同一 PowerShell 会话中将 `$env:TEMP` 和 `$env:TMP` 设置到自己可写、AutoCAD 可读的 ASCII 路径，再执行脚本。安装依赖推荐 `python -X utf8 -m pip install -r requirements.txt`，避免旧版 pip 在中文 Windows 上误用 GBK。
 
 发布范围：常规体检、修复、清理已通过本机 AutoCAD 2020 合成样本验证；教育版识别和清戳仍按实验功能提供，不能替代对照样本及人工打印复核。参照含绝对路径或超出跟随深度时不生成可移植整包。
+
+
+`v0.1.0-beta.2` 修复了打印后退出等待确认的问题。清戳前后对照及内容核验见 [清戳验收记录](docs/EDU-ACCEPTANCE-2026-11-25.md)。`edustrip` 可能升级原 DWG 格式，本次原始 2010 样本重存为 2018；不要将常规 repair 的保留版本保证套用于清戳。
