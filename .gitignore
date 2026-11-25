@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 工具自己的输出目录与产物
+dwg-check/
+eduprint/
+打印验收/
+外部参照/
+整包-已修复/
+*-已修复.dwg
+*-已去戳.dwg
+体检报告-*.md
+去戳报告.md
+外部参照清单.md
+总表.md
+report.json
+batch.json
+edustrip.json
+educheck.json
+*.adt
+
+# 别把任何图纸样本提交上来：涉及客户数据，也可能涉及 Autodesk 授权问题
+*.dwg
+*.DWG
+*.dxf
+*.DXF
+*.dwf
+*.pdf
+
+# CAD 锁文件与自动备份
+*.dwl
+*.dwl2
+*.bak
+~$*
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

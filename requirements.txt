@@ -1,0 +1,9 @@
+# 体检 / 修复 / 清理（dwgpipe.py audit|repair|all、batch_check.py）
+ezdxf>=1.0
+
+# 教育版戳记判定与清除（eduprint.py、dwgpipe.py edustrip）
+# 打印成 PDF 后要渲染成位图，再量边条形态，所以这几个是硬依赖
+pymupdf>=1.23
+opencv-python-headless>=4.8
+pillow>=10.0
+numpy>=1.24
