@@ -2,7 +2,7 @@
 """DWG 修复 / 核查 / 清理 一条龙。
 
 三条硬原则
-1. 绝不在原文件上动手：先复制到纯 ASCII 临时目录，改副本。
+1. 先复制到纯 ASCII 临时目录，改副本。默认不覆盖；--overwrite 验收后校验备份再替换。
 2. 修复与清理只用 CAD 原生命令（AUDIT / PURGE / OVERKILL / entdel），
    不把 DXF 写回 DWG —— DXF 往返会把天正、探索者等自定义对象降级成代理块。
 3. 核查读的是 DXFOUT 出来的副本，只读，不动图。
@@ -27,6 +27,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+from safe_overwrite import sha256, overwrite_result
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 def _rules():
@@ -579,6 +581,8 @@ def print_summary(r: dict):
         print(f"外部参照：{len(xr)} 个" + (f"，其中 {len(miss)} 个找不到文件！" if miss else "，全部就位"))
     print("="*58)
     print(f"临时目录：{r['work']}（跑完自动删除，要留加 --keep-temp）")
+    if r.get("overwrite"):
+        print(f"原图已替换；校验备份：{r['overwrite']['backup_path']}")
 
 
 
@@ -871,6 +875,8 @@ def print_edu_strip(r: dict):
     if a.get("png"):
         print(f"  验收图：{a['png']}")
     print(f"  输出：{r['output_dwg']}")
+    if r.get("overwrite"):
+        print(f"  原图已替换；校验备份：{r['overwrite']['backup_path']}")
 
 
 def write_edu_strip_report(outdir: Path, rows: list, strip_acc: str,
@@ -897,6 +903,8 @@ def write_edu_strip_report(outdir: Path, rows: list, strip_acc: str,
                 if b.get("worst") is not None and a.get("worst") is not None else "—")
         res = "已去戳" if r.get("clean") else "未验证"
         res += f"（DWG {r.get('dwg_version_before')} → {r.get('dwg_version_after')}）"
+        if r.get("overwrite"):
+            res += f"；已覆盖，备份 {r['overwrite']['backup_path']}"
         L.append(f"| {r['label']} | {_verdict(b)} | {_verdict(a)} | {edge} | "
                  f"{r['size_after'] // 1024} | {res} |")
     L.append("")
@@ -1032,7 +1040,12 @@ def main():
     ap.add_argument("--strip-acc", default=None, metavar="PATH",
                     help=f"清教育版戳用的 accoreconsole 路径，必须 {EDU_STRIP_MIN_YEAR}+。"
                          "默认自动发现最高的合格版本")
+    ap.add_argument("--overwrite", action="store_true", help="验收通过后备份并校验原图，再覆盖；默认保留原图")
     ns = ap.parse_args()
+    if ns.overwrite and ns.mode not in ("repair", "all", "edustrip"):
+        ap.error("--overwrite 只用于 repair/all/edustrip")
+    if ns.overwrite and ns.mode == "edustrip" and ns.verify != "print":
+        ap.error("覆盖原图必须使用 --verify print")
 
     global _ACC_OVERRIDE, _STRIP_ACC_OVERRIDE
     _ACC_OVERRIDE = ns.acc
@@ -1076,8 +1089,11 @@ def main():
             if label in used:
                 label = f"{_attach_tag(t) or t.parent.name}_{label}"
             used.add(label)
+            source_hash = sha256(t) if ns.overwrite else None
             r = edu_strip(t, outdir, ns.timeout, do_audit=not ns.no_audit,
                           strip_acc=strip_acc, label=label, verify=ns.verify)
+            if ns.overwrite:
+                overwrite_result(r, source_hash)
             rows.append(r)
             print_edu_strip(r)
             if not ns.keep_temp:
@@ -1133,10 +1149,15 @@ def main():
         if len(files) > 1:
             print(f"\n### {dwg.name}", flush=True)
         drawing_out = outdir / f"{i + 1:04d}-{dwg.name}" if len(files) > 1 else outdir
+        source_hash = sha256(dwg) if ns.overwrite else None
         res = process_with_xrefs(dwg, drawing_out, do_repair, do_clean, ns.timeout,
                                  ns.purge_rounds, with_xref=not ns.no_xref,
                                  max_depth=ns.xref_depth, ref_cache=ref_cache,
                                  ref_outdir=outdir / "外部参照")
+        if ns.overwrite:
+            if any(r.get("fatal") for r in res["refs"]):
+                res["main"]["fatal"] = "参照处理失败，禁止覆盖原图"
+            overwrite_result(res["main"], source_hash)
         (drawing_out / f"{dwg.stem}-report.json").write_text(
             json.dumps(res, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         print_summary(res["main"])

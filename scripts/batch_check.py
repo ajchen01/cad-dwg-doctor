@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from safe_overwrite import sha256, overwrite_result
 from dwgpipe import PRODUCT_SUFFIXES, process_with_xrefs  # noqa: E402
 
 
@@ -48,7 +49,10 @@ def main():
     ap.add_argument("--no-xref", action="store_true", help="不处理外部参照（默认处理）")
     ap.add_argument("--xref-depth", type=int, default=1)
     ap.add_argument("--keep-temp", action="store_true")
+    ap.add_argument("--overwrite", action="store_true", help="需 --repair；先校验备份，再覆盖主图，不自动覆盖跟随参照")
     ns = ap.parse_args()
+    if ns.overwrite and not ns.repair:
+        ap.error("--overwrite 必须与 --repair 一起使用")
 
     root = Path(ns.dir).resolve()
     outdir = Path(ns.out) if ns.out else root / "dwg-check"
@@ -65,11 +69,16 @@ def main():
         t0 = time.time()
         print(f"… {p.name}", flush=True)
         try:
+            source_hash = sha256(p) if ns.overwrite else None
             res = process_with_xrefs(p, drawing_out, do_repair=ns.repair, do_clean=ns.repair,
                                      timeout=ns.timeout, with_xref=not ns.no_xref,
                                      max_depth=ns.xref_depth, ref_cache=ref_cache,
                                      ref_outdir=outdir / "外部参照")
             r = res["main"]
+            if ns.overwrite:
+                if any(x.get("fatal") for x in res["refs"]):
+                    r["fatal"] = "参照处理失败，禁止覆盖原图"
+                overwrite_result(r, source_hash)
         except Exception as exc:
             rows.append(dict(name=p.name, kb=p.stat().st_size // 1024, fatal=f"{type(exc).__name__}: {exc}"))
             continue
@@ -109,6 +118,7 @@ def main():
             secs=round(time.time() - t0, 1),
             out=r.get("output_dwg"),
             bundle=res.get("bundle"),
+            overwrite=r.get("overwrite"),
         ))
         if not ns.keep_temp:
             for x in [r] + res["refs"]:
@@ -150,6 +160,11 @@ def main():
         xw = sum(r.get("warn", 0) for r in xrows)
         L.append(f"\n参照合计：**{xe} 错误 / {xw} 警告**\n")
 
+    replacements = [r for r in rows if r.get("overwrite")]
+    if replacements:
+        L += ["\n## 原图替换与备份\n"]
+        for r in replacements:
+            L.append(f"- {r['name']}：备份 `{r['overwrite']['backup_path']}`，SHA-256 `{r['overwrite']['backup_sha256']}`")
     (outdir / "总表.md").write_text("\n".join(L), encoding="utf-8")
     print("\n".join(L))
     if any(r.get("fatal") for r in rows + xrows):
