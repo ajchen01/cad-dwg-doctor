@@ -1,269 +1,245 @@
-# CAD 图纸医生
+<p align="center">
+  <img src="docs/assets/readme-hero.png" alt="CAD 图纸医生：主图与参照，一起处理" width="100%">
+</p>
 
-**别人给的 DWG，先让它过一遍。**
+<h1 align="center">CAD 图纸医生</h1>
 
-> 当前版本：`v0.1.0-beta.5`。常规体检、修复和清理已通过 AutoCAD 2020 合成样本验收；教育版清戳已通过公开对照及三实体合成样本验收，并经用户目视确认；工程图、参照和多布局仍为实验范围。完整验证范围见 [发布验收报告](docs/RELEASE-READINESS.md)。
->
-> [下载 GitHub 预发布版](https://github.com/ajchen01/cad-dwg-doctor/releases/tag/v0.1.0-beta.5)。解压 ZIP 后，将 `cad-dwg-doctor` 文件夹放入宿主技能目录。
+<p align="center"><strong>给一张主图，连同参照一起检查、修复与清理。</strong><br>
+保留原版本。需要覆盖时，先备份，再替换。</p>
 
-体检 → 修复 → 清理 → 去教育版戳。全程无头调用 AutoCAD 的 `accoreconsole`，不弹界面、不用点鼠标，可以塞进批处理里对着一整个目录跑。
+<p align="center">
+  <a href="https://github.com/ajchen01/cad-dwg-doctor/actions/workflows/validate.yml"><img src="https://github.com/ajchen01/cad-dwg-doctor/actions/workflows/validate.yml/badge.svg" alt="GitHub Actions 验证"></a>
+  <a href="https://github.com/ajchen01/cad-dwg-doctor/releases"><img src="https://img.shields.io/github/v/release/ajchen01/cad-dwg-doctor?include_prereleases&label=release&color=164b69" alt="最新预发布版"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-164b69" alt="平台 Windows">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-164b69" alt="Python 3.10 及以上">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-48635b" alt="MIT 协议"></a>
+</p>
 
-```bash
-python scripts/dwgpipe.py audit "图纸.dwg"        # 只体检，不动文件
-python scripts/dwgpipe.py all   "图纸.dwg"        # 体检 + 修复 + 清理
-python scripts/eduprint.py check "图纸.dwg"       # 打印出来看有没有教育版水印
-```
+<p align="center">
+  <a href="https://github.com/ajchen01/cad-dwg-doctor/releases/tag/v0.1.0-beta.5"><strong>下载技能包</strong></a> ·
+  <a href="#results">看真实效果</a> ·
+  <a href="#install">安装</a> ·
+  <a href="#commands">命令速查</a> ·
+  <a href="#validation">验收与边界</a>
+</p>
 
 ---
 
-## 它解决什么问题
+## 一句话，让整套图纸过一遍
 
-别人（设计院、甲方、协作方）发来的施工图，常见的四种病：
+这是给 AI agent 使用的 **DWG 处理技能**，也可以直接通过 Python 命令调用。本机 AutoCAD 负责读写图纸，技能负责串起检查、修复、参照处理和验收报告。
 
-| 症状 | 病因 | 这个工具怎么办 |
+安装后，可以直接这样说：
+
+```text
+使用 $cad-dwg-doctor 体检这张主图及全部参照，不覆盖原文件。
+
+修复并清理这套 DWG，保持每份图纸的原版本，给我前后对比。
+
+清除这张主图及全部参照的教育版戳记。需要覆盖原文件，先备份并校验。
+```
+
+不用逐个列出参照。**从主图开始，默认递归所有可解析的 DWG 参照**，包括嵌套参照；共享文件在同一次任务中去重处理。
+
+> **运行条件：Windows + Python 3.10+ + 已安装并激活的 AutoCAD。**
+> 普通处理使用 AutoCAD 2020+；清戳需要 2022+ 内核。无须打开 CAD 界面，仍然需要本机 AutoCAD。
+
+<a id="results"></a>
+
+## 先看一次真实验收
+
+下面是同一份合成 DWG 的清戳前后打印件。四边的 `AUTODESK` 水印消失，线、圆和文字保留；前后导出的 DXF 也核对了这三个实体的几何与文字属性。
+
+<table>
+  <tr>
+    <th width="50%">处理前</th>
+    <th width="50%">处理后</th>
+  </tr>
+  <tr>
+    <td><img src="docs/edu-acceptance-before.png" alt="清戳前：四边有 AUTODESK 水印，图中有线、圆及文字" width="100%"></td>
+    <td><img src="docs/edu-acceptance-after.png" alt="清戳后：四边未见水印，线、圆及文字保留" width="100%"></td>
+  </tr>
+</table>
+
+<p align="center"><sub>公开样本衍生的合成图纸，不含客户数据。上方封面是项目示意图，此处为实际验收打印件。</sub></p>
+
+这是一组样本的结果，不能代替所有图纸和布局的验收。完整记录见 [清戳与版本验收](docs/EDU-ACCEPTANCE-2026-11-25.md)，嵌套图集验证见 [参照验收](docs/XREF-ACCEPTANCE-2026-11-25.md)。
+
+## 它会替你做什么
+
+| 你遇到的问题 | 处理方式 | 你拿到什么 |
 |---|---|---|
-| 打开报错、`ZOOM E` 后满屏一个点、捕捉总捕到怪点 | 数据库层有错误、零长线、游离图元 | `AUDIT` 修 + 删零长线 + 报告游离图元 |
-| 几十 MB，一半是没人用的图层块样式 | 历史堆积 | 多轮 `-PURGE`，报告实体的真实变化 |
-| 带一堆外部参照，只修主图等于白修 | xref | 参照一起处理，并拼成相对路径完好的整包 |
-| 打印出来四边有 `AUTODESK` 水印 | 教育版 / 学生版画的 | 打印件形态启发式检查（须复核），2022+ 内核可清 |
+| 收到图纸，想先判断质量 | 读取 DXF 副本，分析图层、文字、几何、样式等 20+ 项 | 中文体检报告，含问题级别与定位线索 |
+| 数据库报错、零长线、空文字 | 原生 `AUDIT` 修复，可清理零长线和空文字 | 修复成品与前后报告 |
+| 无用块、图层、样式堆积 | 多轮原生 `PURGE`，统计处理前后变化 | 清理成品及实际变化记录 |
+| 一套主图带多层参照 | 递归解析 DWG 依赖，共享文件去重 | 主图与参照的处理结果；条件满足时生成相对路径整包 |
+| 怀疑存在教育版打印戳记 | 打印成 PDF，分析边条形态；2022+ 原生保存后复打 | 前后 PDF、PNG 与判定依据 |
+| 想用成品替换原图 | 显式开启覆盖，先备份并核对 SHA-256 | 原位成品、独立备份及可追溯报告 |
 
-前三条是纯粹的工程质量问题，第四条牵涉授权，单独说 —— 见 [教育版戳记](#教育版戳记)。
+详细检查项见 [体检规则清单](references/checklist.md)。图纸文件大小只作参考，处理效果看问题数、实体与符号表变化。
 
----
+<a id="install"></a>
 
-## 能做什么 / 不能做什么
+## 装上就能用
 
-**能**
+### 1. 放入技能目录
 
-- `AUDIT` 修复数据库层损坏（表记录错乱、句柄重复）
-- 清理无用图层 / 块 / 线型 / 文字样式 / 标注样式 / 材质（多轮 `-PURGE`）
-- 删零长线、空文字（纯 LISP，安全可回退）
-- 20+ 项深度体检（见 [`references/checklist.md`](references/checklist.md)）
-- 外部参照跟随处理，输出可直接打开的整包
-- 教育版戳记：判定 + 清除（需 2022+ 内核）
-- 中文 Markdown 报告、修复前后对比、批量总表
+从 [GitHub Releases](https://github.com/ajchen01/cad-dwg-doctor/releases) 下载 `cad-dwg-doctor.zip`，解压后将整个 `cad-dwg-doctor` 文件夹放入 agent 的技能目录。
 
-**不能**
+Codex 默认技能目录的 Windows 安装示例：
 
-- **修不好「彻底损坏」的文件**。`AUDIT` 修的是数据库结构，不是数据恢复。打不开的图要先 `RECOVER`，`RECOVER` 也失败就是真没了（找 `.bak` 或平台历史版本）
-- **不动天正 / 探索者等自定义对象**。代理对象只能原样保留，无法编辑或转成基本图元
-- **不做设计判断**。标注值对不对、标高合不合理、图框套没套对，这些是人的活
-- **不自动删重复实体**。`OVERKILL` 在无头模式下会挂死会话（实测跑完不返回、后续 `QSAVE` 全不执行），所以只报告，让人在 GUI 里跑
-
----
-
-## 安装
-
-**平台：Windows**（`accoreconsole` 只有 Windows 版）。Python 3.10+。
-
-```bash
-pip install -r requirements.txt
+```text
+%USERPROFILE%\.codex\skills\cad-dwg-doctor\
 ```
 
-**AutoCAD**：不需要 GUI，只要有 `accoreconsole.exe`（AutoCAD 2020 及以上自带，无需额外组件）。找一个：
+**保留整个文件夹，不要只复制 `SKILL.md`。** 脚本、参考资料及依赖文件必须一起安装。
 
-```
-1. 环境变量 ACCORECONSOLE   ← 绿色版 / 便携版 / 非标准安装用这个
-2. C:\Program Files\Autodesk\AutoCAD 20xx\   （也会扫 D:、E: 盘的同名目录）
-3. PATH
-```
-
-也可以在命令行用 `--acc <路径>` 直接指定。
-
----
-
-## 三分钟上手
-
-```bash
-# ① 只体检，不动图。先看有没有问题，最常用
-python scripts/dwgpipe.py audit "图纸.dwg"
-
-# ② 体检 + 修复 + 清理，输出「已修复.dwg」和前后两份报告
-python scripts/dwgpipe.py all "图纸.dwg" --out "输出"
-
-# ③ 批量体检整个目录，出一张总表
-python scripts/batch_check.py "D:\项目\图纸" --out "D:\项目\dwg-check"
-
-# ④ 批量体检 + 修复
-python scripts/batch_check.py "D:\项目\图纸" --repair
-```
-
-**修复先在副本上完成，默认不覆盖原图。** 明确需要覆盖时使用 `--overwrite`，必须先校验备份与成品。 成品是 `<原名>-已修复.dwg`。
-常规修复按原 DWG 格式显式另存，并核对成品文件头。比如 2013 版输入必须输出 2013 版。主图和参照都执行此检查，版本无法保留时报错。
-
-批量报告和修复产物按主图的相对路径存入 `主图/`。各主图拥有自己的整包，共用参照在同一次批处理中只处理一次，每份整包分别复制所需的参照。缺失或处理失败的参照会进入总表，批量命令返回非零。
-
-**退出码**：全部成功返回 `0`，有文件处理失败返回 `1` 并列出失败的文件名。批量跑和 CI 里可以直接用 `&&` 或 `if` 判断，不用去 grep 日志。
-
-详细命令见 [`SKILL.md`](SKILL.md)，那里有完整参数表和踩过的坑。
-
----
-
-## 教育版戳记
-
-这是这个工具做得最深的一块，也是唯一有争议的一块。
-
-### 判定：打印形态检查（实验功能）
-
-以下样本数据来自历史记录，不是本次版本回归结果。当前算法会误报或漏报；仅覆盖当前打印页面，须结合 PDF/PNG 及已知对照样本复核。
-
-试过并且**全部证伪**的三条路：
-
-| 方法 | 为什么不行 |
-|---|---|
-| 扫 DWG 字节找 `ACAD_EDU` / `Educational` | 数据段是压缩的，连 `AcDb:` 都搜不到。官方带戳样本里一个特征串都没有 |
-| 扫导出的 DXF 明文 | 带戳和干净两张的 DXF 内容一模一样，戳不在文本层 |
-| 无头开图抓「按 ENTER 键继续」 | 这行的真身是 **SYSVARMONITOR 的系统变量监控气泡**被压平出来的，跟教育版无关。补齐全部字体和参照后，干净图和带戳图弹得一字不差 |
-
-现在唯一的判据是**打印**：把图打成 PDF → 渲染成位图 → 看页面最外 10% 的边条。
-
-判据不是「边条有多黑」，而是「这条边是不是那行 `AUTODESK` 的字」：
-
-| 特征 | 带戳的边条 | 图面内容伸进边条 |
-|---|---|---|
-| 连通块个数 | **6~10（正好 8 个字母）** | 3 块、26 块、47 块、271 块…… |
-| 暗像素占比 | **0.6~0.8%（很稳）** | 0.22% / 0.65% / 0.87% / 9.4% |
-| 沿边长度占比 | 8~15% | 5~100% |
-| 分布 | 多条边同一行字，深浅一致 | 通常只在一两条边 |
-
-只看比例必然误判 —— 实测有张干净图的图框让右边边条暗到 **9.4%**，比真水印黑十倍。按「暗像素 ≥0.10% 就算带戳」跑，16 张里误判 10 张；历史记录中，改成认形态后，29 张打印件回归：**真带戳 8/8、真干净 21/21、矛盾 0**。
-
-```bash
-python scripts/eduprint.py check "图纸.dwg" --out 报告目录
-```
-
-产物是 PDF + PNG，可以直接翻图核对，不用信脚本的结论。
-
-![同一张图清洗前后的四边水印对比](docs/demo-stamp.png)
-
-> 上图用的测试图是 [JTB World 免费公开的 EduFinder 样本](https://jtbworld.com/edufinder)
-> （`Drawing with stamp 2010 format.dwg`），不含任何客户数据。这个样本页面本身是空的、
-> 一个图元都没有，四边照样有水印 —— 正好说明戳在文件头，不在图元里。
-
-### 清除：只有 2022+ 官方路径
-
-| 手段 | 实测结果 |
-|---|---|
-| DXF 往返（`DXFOUT` → `SAVEAS 2018`） | **仍带戳** |
-| 商业版 AutoCAD 2020 另存 | **仍带戳** |
-| 把图元全删光再另存 | **仍带戳**（戳是文件级的，不随内容走） |
-| **AutoCAD 2022+ 打开另存** | **清掉** |
-| DWG TrueView 2027 | **不可用**：`QSAVE`/`SAVEAS`/`DXFOUT` 全是 `Unknown command`，只读内核没有写盘路径 |
-
-所以本工具的清戳流程就三步，不搞花活：
-
-```bash
-python scripts/dwgpipe.py edustrip "图纸.dwg"
-```
-
-1. **判定**（非教育版内核打印）→ 不带戳直接跳过，不动文件
-2. **清戳**（2022+ 内核）→ 打开 →（可选 `AUDIT`）→ 按原 DWG 版本 `SAVEAS` 到独立副本，再核对文件头
-3. **复验**（再打印一次）→ 还带戳就报「仍带戳，需人工」，**绝不假装成功**
-
-每张都留清除前后的打印件在 `打印验收/`，这是能翻图复核的硬证据。
-
-历史记录中，一套 16 张的住宅施工图（5 主图 + 11 参照）：**已清 8，本来就干净 8，失败 0**。
-
-### 合规
-
-教育版只授权教学使用，商用不符合 Autodesk 许可协议。带戳的图送审 / 交付会被退回。
-
-**这个工具提供「判定」，主要用途是让收图方知道该把图退回去，要求出图方用正版重出。** 清除功能的存在，是为了处理「自己早年用学生版画的图」这类历史遗留。用它把别人教育版画的图洗白后交付，责任在使用者。
-
----
-
-## 它是怎么做到的
-
-三条设计原则，决定了代码长什么样：
-
-**1. 体检读 DXF，修复写 DWG —— 绝不把 DXF 写回 DWG。**
-DXF 往返会把天正 / 探索者的自定义对象降级成**代理块**，T20 的墙、门窗、设备全变成死块。所以结构分析靠 `DXFOUT` 出来的只读副本，所有修改都用 CAD 原生命令在 DWG 上做。
-
-**2. 所有 CAD 侧操作跑在纯 ASCII 临时目录。**
-`accoreconsole` 的 `/i` `/s` 参数遇到中文路径会按本地 ANSI 解坏（报「无法加载程序集」这类完全不指向真因的错误）。流水线自动把文件复制到 `%TEMP%` 下的 ASCII 目录作业，成品再拷回。
-
-**3. 尺度判定用中位数，不用包围盒。**
-图里只要有一个误粘贴的远点（跑到 x=1e8），包围盒就被撑爆，「超远坐标」和「极短图元」两条规则会同时自我失效。现在用「到中位中心距离的 90 分位」定尺度，游离点污染不到它。
-
----
-
-## 实测数据
-
-`references/operations.md` 里保存了历史踩坑记录，这里挑几个关键的：
-
-**文件大小不能当清理效果的唯一指标。** 一张 451,794 字节的图，什么都不删只 `QSAVE` 重存一遍，文件反而涨到 496,089 字节（+9.8%）—— 不同版本写盘密度不同，重存本身就会膨胀。清洗后 485,649 字节，比裸重存小约 10 KB，这才是真正省下的量。**判断清理是否有效看实体数、图层/块/样式数，别看字节数。**
-
-**`OVERKILL` 会挂死无头会话。** 命令本身跑完了，但进程退出时卡住，后续 `QSAVE` / `DXFOUT` 全不执行，150 秒超时仍未返回。已从流水线移除。
-
-**`AUDIT` 的结论只在 `.adt` 里。** 必须 `(setvar "AUDITCTL" 1)`，`.adt` 与 DWG 同目录同名，GBK 编码，关键句是「共发现 N 个错误，已修复 N 个」。
-
-更多见 [详细操作与历史记录](references/operations.md)。
-
----
-
-## 已知限制
-
-- 只在 Windows 下工作（`accoreconsole` 决定）
-- 需要本机装了 AutoCAD 2020+。**没装 AutoCAD 就完全跑不起来**，不是纯 Python 库
-- 去戳需要 2022+，且**不能是教育版授权**——教育版内核打印会给每张图盖章，反而污染判定
-- 残缺 / 精简版 AutoCAD 的 `accoreconsole` 会一启动就段错误（判据：目录里缺 `adlmint.dll`、`AdskLicensingSDK_4.dll`，体积明显偏小）
-- 默认递归所有可解析 DWG 参照；用户主动限制深度时，不完整覆盖会返回失败
-- 报中文，暂不支持英文输出
-
----
-
-## 合规与免责
-
-- **与 Autodesk 无关。** 本项目非官方，未获 Autodesk 认可或背书。AutoCAD、DWG、DWG TrueView 是 Autodesk, Inc. 的商标
-- 使用本工具需自行确保拥有相应 AutoCAD 授权
-- 教育版戳记的处理涉及 Autodesk 许可协议，**请阅读上面的[合规](#合规)一节**。作者不对使用者的授权合规性负责
-- 修图前请自行备份。虽然设计上原图只读，但任何自动化工具都不该被无条件信任
-
----
-
-## License
-
-[MIT](LICENSE)
-
-
-## 技能安装与发布验证
-
-将本仓库的 `SKILL.md`、`agents/`、`scripts/`、`references/` 和 `requirements.txt` 放到同一个 `cad-dwg-doctor/` 目录，再复制到宿主的技能目录。脚本按技能绝对路径调用，不依赖用户当前目录。无需安装此仓库的历史输出或客户图纸。
-
-发布前运行 `python -m unittest discover -s tests -v` 和 skill-creator 的 `quick_validate.py`。发布状态与宿主验证限制见 [docs/RELEASE-READINESS.md](docs/RELEASE-READINESS.md)。打印识别只覆盖本次页面，未检出不等于文件或所有布局无戳。历史样本成功率不可视为当前版本承诺。
-
-
-若宿主沙箱临时目录无法被 AutoCAD 访问，请在同一 PowerShell 会话中将 `$env:TEMP` 和 `$env:TMP` 设置到自己可写、AutoCAD 可读的 ASCII 路径，再执行脚本。安装依赖推荐 `python -X utf8 -m pip install -r requirements.txt`，避免旧版 pip 在中文 Windows 上误用 GBK。
-
-发布范围：常规体检、修复、清理已通过本机 AutoCAD 2020 合成样本验证；教育版识别和清戳仍按实验功能提供，不能替代对照样本及人工打印复核。参照含绝对路径或超出跟随深度时不生成可移植整包。
-
-
-`v0.1.0-beta.5` 修复了打印后退出等待确认的问题。清戳前后对照及内容核验见 [清戳验收记录](docs/EDU-ACCEPTANCE-2026-11-25.md)。所有 DWG 输出（包括清戳）都必须保留输入版本；无法保留时失败，不交付升降级成品。已用 2010、2013、2018 带戳样本验证：版本一致且后印未检出水印。
-
-
-## 明确要求覆盖原文件
+<details>
+<summary>也可以用 Git 安装</summary>
 
 ```powershell
-python scripts/dwgpipe.py all "图纸.dwg" --overwrite
-python scripts/dwgpipe.py edustrip "图纸.dwg" --overwrite --verify print
-python scripts/batch_check.py "图纸目录" --repair --overwrite
+git clone https://github.com/ajchen01/cad-dwg-doctor.git "$env:USERPROFILE\.codex\skills\cad-dwg-doctor"
 ```
 
-不传 `--overwrite` 时仍保留原图。传入时，成品验收通过后，在原图旁创建带 UTC 时间戳及随机标识的 `.bak` 备份，校验 SHA-256；再校验成品及版本，通过后原子替换原图。备份失败、输入被修改、存在 CAD 锁文件、成品复验失败或版本变化时均不覆盖。备份保留，不会覆盖旧备份；路径和哈希写入 JSON/Markdown 报告。
+如果宿主配置了其他技能目录，使用该目录即可。
 
-显式覆盖同时适用于主图及其全部可解析 DWG 参照，每份文件独立备份、校验并保持原版本；共享参照在同一任务内只备份和替换一次。批量按文件执行，部分成功后不会自动整批回滚。清戳 `--verify none` 和只读模式不支持覆盖；旧 deedu 命令现转到 edustrip 的递归原生流程。普通修复的“复验通过”指保存、版本和修后 DXF 可读，不保证图纸问题数为零或设计验收通过。
+</details>
 
+### 2. 安装 Python 依赖
 
-## 所有操作默认包含全部 DWG 参照
-
-从单个主图开始，体检、修复、清理、打印检查、清戳以及显式覆盖均递归处理其 DWG 参照，不限深度。缺失参照、参照发现失败或用户限制深度导致覆盖不完整时返回非零；不完整图集禁止原位覆盖。共享及循环参照按规范路径去重。
+在安装后的技能目录运行：
 
 ```powershell
-python scripts/dwgpipe.py edustrip "主图.dwg" --overwrite
-python scripts/dwgpipe.py all "主图.dwg" --overwrite
+python -X utf8 -m pip install -r requirements.txt
+```
+
+### 3. 确认 AutoCAD 引擎
+
+脚本自动查找 `accoreconsole.exe`。非标准安装路径可以明确指定：
+
+```powershell
+python scripts/dwgpipe.py audit "D:\图纸\主图.dwg" --acc "D:\AutoCAD 2020\accoreconsole.exe"
+```
+
+也可以设置环境变量 `ACCORECONSOLE`。清戳引擎可通过 `--strip-acc` 指定，需 AutoCAD 2022+。
+
+<a id="commands"></a>
+
+## 命令速查
+
+以下命令在技能目录执行，**默认均包含主图的全部可解析 DWG 参照**。
+
+```powershell
+# 只体检，保留原图
+python scripts/dwgpipe.py audit "主图.dwg"
+
+# 修复并清理，输出副本
+python scripts/dwgpipe.py all "主图.dwg" --out "处理结果"
+
+# 检查打印戳记
 python scripts/eduprint.py check "主图.dwg"
+
+# 清戳，前后打印验收，输出副本
+python scripts/dwgpipe.py edustrip "主图.dwg"
+
+# 明确覆盖：主图和参照逐份备份、校验后替换
+python scripts/dwgpipe.py all "主图.dwg" --overwrite
+python scripts/dwgpipe.py edustrip "主图.dwg" --overwrite
+
+# 批量修复与清理
+python scripts/batch_check.py "D:\图纸" --repair
 ```
 
-清戳先处理参照，再处理宿主，使用处理后的参照快照复验打印。副本模式按原相对路径生成整包；含绝对路径或目录外依赖时不会声称整包可移植。`--no-xref` 仅用于用户明确要求排除参照的场景。旧 educheck/deedu 命令分别转到递归打印检查和递归原生清戳，不再使用废弃判据。
+| 可选参数 | 用途 |
+|---|---|
+| `--out "目录"` | 指定报告与成品位置，默认输出到 `dwg-check/` |
+| `--overwrite` | 显式覆盖原文件；主图和参照分别备份、校验 |
+| `--no-clean` | 保留零长线、空文字，只做原生修复和符号表清理 |
+| `--timeout 1800` | 放宽单次 AutoCAD 会话超时 |
+| `--no-xref` | 只在明确要求排除参照时使用 |
+| `--xref-depth N` | 主动限制层数；仍有未处理依赖时返回失败 |
 
-真实宿主及去重、备份验收见 [参照验收报告](docs/XREF-ACCEPTANCE-2026-11-25.md)。
+各入口使用 `--help` 查看完整参数。高级操作与历史排错记录见 [操作参考](references/operations.md)。
+
+## 一张主图，沿参照关系处理整套 DWG
+
+```mermaid
+flowchart LR
+    A["主图 A.dwg"] --> B["参照 B.dwg"]
+    A --> C["参照 C.dwg"]
+    B --> D["共享参照 D.dwg"]
+    C --> D
+```
+
+- **递归处理**：不局限于 `.Attach` 目录，按图纸保存的参照路径解析。
+- **共享去重**：D 被两份图引用，也只处理一次；覆盖时只创建一份独立备份。
+- **清戳顺序**：先处理参照，再处理宿主；复验打印使用本次处理后的参照快照。
+- **完整性检查**：缺参照、发现失败或深度截断会返回失败，禁止覆盖不完整图集。
+
+副本模式在路径条件满足时生成整包。含绝对路径或目录外依赖时，不保证整包可移植；具体结果写在报告中。
+
+## 覆盖不是直接写回原图
+
+**默认只生成副本。** 只有明确要求“覆盖原文件”，技能才会使用 `--overwrite`。
+
+```text
+副本处理 → 成品复验与版本核对 → 创建备份并核对哈希 → 原子替换
+```
+
+每份实际替换的 DWG，都在原文件旁留下独立备份：
+
+```text
+主图.dwg
+主图.dwg.backup-20261125T104429518631Z-随机标识.bak
+```
+
+备份失败、哈希不一致、处理期间源文件变化、存在 CAD 锁文件、成品验收失败或版本不一致时，均不允许替换。旧备份保留，备份路径和哈希记录在报告中。
+
+**输入 2010，就输出 2010；输入 2013，就输出 2013。** 主图和参照、普通修复和清戳都执行版本核验，无法保留原格式时失败。
+
+批量覆盖按文件执行，不提供整批事务回滚；若后续文件失败，已完成的替换及其备份会保留。清戳覆盖必须经过前后打印，不能使用 `--verify none`。
+
+<a id="validation"></a>
+
+## 验收有记录，边界也写清楚
+
+当前发布为 **`v0.1.0-beta.5` 预发布版**。42 项回归测试，以及 Windows Python 3.10 / 3.11 的 GitHub Actions 验证已通过；CI 不包含 AutoCAD，原生宿主测试另有记录。
+
+| 已验证的场景 | 证据 |
+|---|---|
+| DWG 2010 / 2013 / 2018 清戳前后版本一致，成品可重开 | [清戳验收](docs/EDU-ACCEPTANCE-2026-11-25.md) |
+| 三份 DWG 的嵌套图集：副本清戳、连参照覆盖、整包复查 | [参照验收](docs/XREF-ACCEPTANCE-2026-11-25.md) |
+| 两张主图共享参照，仅产生四份唯一备份 | [共享参照与备份](docs/XREF-ACCEPTANCE-2026-11-25.md) |
+| 备份失败、源文件变化、锁文件及替换失败等保护路径 | [发布验证记录](docs/RELEASE-READINESS.md) |
+
+**使用前需要知道：**
+
+- **循环参照**目前只有遍历去重，尚不自动解除循环，也未将循环单独列为覆盖阻断项。应先人工理清循环关系，再进行清戳或覆盖；循环遍历仅做过模拟测试。
+- **打印识别是启发式检查**，可能误报或漏报，只覆盖本次输出页面。须结合 PDF / PNG 复核；未检出不证明文件的全部布局无戳，也不证明许可资格。
+- **复杂客户工程图、第三方代理对象与多布局**仍待进一步验收。不能把公开、合成样本通过扩展成工程交付保证。
+- **不做设计判断**，不自动删除重复或游离图元。严重损坏到无法打开的 DWG，需要先用 AutoCAD `RECOVER` 或查找历史备份。
+
+退出码 `0` 表示处理流程成功，不等于图纸零错误或专业验收通过。有失败时返回非零并保留相应报告。
+
+<details>
+<summary>输出文件与故障定位</summary>
+
+| 输出 | 内容 |
+|---|---|
+| `*-体检报告-修复前.md` / `*-体检报告-修复后.md` | 分级问题、概况及实体统计 |
+| `*-已修复.dwg` / `*-已去戳.dwg` | 保持原格式的候选成品 |
+| `*-report.json` / `batch.json` / `edustrip.json` | 结构化结果、失败信息、备份记录 |
+| `打印验收/` | 清戳前后 PDF 与 PNG |
+| `整包…/` | 条件满足时，按原相对路径组织的主图与参照 |
+
+如果 AutoCAD 无法访问宿主沙箱的临时目录，在同一 PowerShell 会话中把 `$env:TEMP`、`$env:TMP` 指向可写且 AutoCAD 可读的 ASCII 路径。使用 `--keep-temp` 保留相应处理入口的中间文件。
+
+详细入口：[技能说明](SKILL.md) · [检查规则](references/checklist.md) · [操作与排错](references/operations.md)。
+
+</details>
+
+---
+
+[MIT License](LICENSE)。本项目非 Autodesk 官方产品，使用 AutoCAD 需满足相应许可条件；清除打印戳记不改变图纸的使用授权。
+
+<sub>README 的展示结构参考了 <a href="https://github.com/alchaincyf/huashu-design">Huashu Design</a>：先讲用途，再用真实结果说明能力。封面为本项目生成，未使用参考项目的图片。</sub>
