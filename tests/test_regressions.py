@@ -21,14 +21,15 @@ class RegressionTests(unittest.TestCase):
             self.assertIn('[MARK-PLOT-DONE]', log)
             self.assertIn('waiting for confirmation', log)
 
-    def test_print_collection_excludes_attach_and_products(self):
+    def test_print_collection_includes_attach_but_excludes_products(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'a.dwg').touch()
             (root / 'a-已修复.dwg').touch()
             (root / 'ref.dwg.Attach').mkdir()
             (root / 'ref.dwg.Attach' / 'b.dwg').touch()
-            self.assertEqual(eduprint.collect([tmp]), [root / 'a.dwg'])
+            self.assertEqual(eduprint.collect([tmp]), [root / 'a.dwg', root / 'ref.dwg.Attach' / 'b.dwg'])
+            self.assertEqual(eduprint.collect([tmp], include_attach=False), [root / 'a.dwg'])
 
     def test_batch_collection_excludes_directories_named_dwg(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,8 +158,31 @@ class BundleTests(unittest.TestCase):
             main = {'xrefs': [{'path': str(ref), 'raw': str(ref) if raw == 'absolute' else 'ref.dwg', 'exists': True}], 'output_dwg': str(host)}
             target = {'input': str(ref), 'output_dwg': str(ref), 'xrefs': [{'path': str(child), 'raw': 'child.dwg', 'exists': True}] if nested else []}
             with patch.object(dwgpipe, 'pipeline', side_effect=[main, target]), patch.object(dwgpipe, 'write_xref_table'), patch.object(dwgpipe, 'build_bundle', return_value='bundle') as build:
-                result = dwgpipe.process_with_xrefs(host, root / 'out', True, True, 10)
+                result = dwgpipe.process_with_xrefs(host, root / 'out', True, True, 10, max_depth=1)
             return result, build.called
+
+    def test_reference_also_selected_as_root_is_processed_only_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();host=root/'host.dwg';ref=root/'ref.dwg'
+            main={'input':str(host),'output_dwg':str(host),'xrefs':[{'path':str(ref),'raw':'ref.dwg','exists':True}]}
+            child={'input':str(ref),'output_dwg':str(ref),'xrefs':[]}
+            cache={}
+            with patch.object(dwgpipe,'pipeline',side_effect=[main,child]) as process,patch.object(dwgpipe,'write_xref_table'),patch.object(dwgpipe,'build_bundle',return_value='bundle'):
+                dwgpipe.process_with_xrefs(host,root/'out1',True,True,10,ref_cache=cache)
+                dwgpipe.process_with_xrefs(ref,root/'out2',True,True,10,ref_cache=cache)
+            self.assertEqual(process.call_count,2)
+
+    def test_default_recurses_through_all_nested_references(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            host,mid,leaf=[root/n for n in ['host.dwg','mid.dwg','leaf.dwg']]
+            main={'input':str(host),'output_dwg':str(host),'xrefs':[{'path':str(mid),'raw':'mid.dwg','exists':True}]}
+            middle={'input':str(mid),'output_dwg':str(mid),'xrefs':[{'path':str(leaf),'raw':'leaf.dwg','exists':True}]}
+            last={'input':str(leaf),'output_dwg':str(leaf),'xrefs':[]}
+            with patch.object(dwgpipe,'pipeline',side_effect=[main,middle,last]),patch.object(dwgpipe,'write_xref_table'),patch.object(dwgpipe,'build_bundle',return_value='bundle'):
+                result=dwgpipe.process_with_xrefs(host,root/'out',True,True,10)
+            self.assertTrue(result['coverage_complete'])
+            self.assertEqual([r['input'] for r in result['refs']],[str(mid),str(leaf)])
 
     def test_absolute_reference_does_not_create_portable_bundle(self):
         result, built = self.run_case('absolute')

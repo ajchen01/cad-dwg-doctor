@@ -28,7 +28,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from safe_overwrite import sha256, overwrite_result
+from safe_overwrite import sha256, overwrite_group
+from xref_graph import discover_graph
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 def _rules():
@@ -311,6 +312,7 @@ def pipeline(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool, timeout: 
     shutil.copy2(dwg, src)
     outdir.mkdir(parents=True, exist_ok=True)
     result = {"input": str(dwg), "label": label, "work": str(work), "accoreconsole": acc}
+    result["source_sha256"] = sha256(src)
     version = dwg_version(src)
     result["dwg_version_before"] = version.decode("ascii", "replace")
     save_format = DWG_SAVE_FORMATS.get(version)
@@ -389,14 +391,16 @@ def pipeline(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool, timeout: 
     return result
 
 
-def extract_xrefs(dxf: Path, base_dir: Path) -> list[dict]:
+def extract_xrefs(dxf: Path, base_dir: Path, strict: bool = False) -> list[dict]:
     """从 DXF 块定义里读外部参照路径（组码 1 = xref_path），解析成本机实际文件。
     相对路径按主图所在目录解析；找不到的也列出来——"参照丢了"本身就是要报的问题。"""
     out = []
     try:
         import ezdxf
         doc = ezdxf.readfile(str(dxf))
-    except Exception:
+    except Exception as exc:
+        if strict:
+            raise ValueError(f"参照 DXF 无法读取：{exc}") from exc
         return out
     for b in doc.blocks:
         try:
@@ -412,8 +416,39 @@ def extract_xrefs(dxf: Path, base_dir: Path) -> list[dict]:
         if not p.is_absolute():
             p = base_dir / p
         p = p.resolve()
-        out.append({"name": b.name, "raw": raw, "path": str(p), "exists": p.is_file()})
+        out.append({"name": b.name, "raw": raw, "path": str(p), "exists": p.is_file(), "handle": b.block.dxf.handle})
     return out
+
+
+def discover_operation_graph(files, timeout, with_xref=True, max_depth=None, acc=None):
+    """Export reference metadata without saving the input DWG or interpreting plot stamps."""
+    def read_refs(dwg):
+        work = _new_workdir("discover_")
+        staged = work / "in.dwg"
+        shutil.copy2(dwg, staged)
+        exported = work / "refs.dxf"
+        script = work / "refs.scr"
+        script.write_text(PRELUDE + dxfout(exported.as_posix(), "REFS") +
+                          '(princ "\\n[MARK-END]")\n', encoding="ascii")
+        rc, log = run_session(acc or find_acc(), staged, script, timeout, work / "discover.log")
+        if rc or "[MARK-DXF-REFS]" not in log or "[MARK-END]" not in log or not exported.is_file():
+            raise ValueError(f"DWG 参照导出失败；日志 {work / 'discover.log'}")
+        refs = extract_xrefs(exported, dwg.parent, strict=True)
+        # This directory was allocated by _new_workdir for this discovery only.
+        if work.resolve().parent == (Path(tempfile.gettempdir()) / "dwgfix").resolve():
+            shutil.rmtree(work)
+        return refs
+    return discover_graph(files, read_refs, with_xref=with_xref, max_depth=max_depth)
+
+
+def overwrite_operation(result, overwrite_cache):
+    """All resolved DWGs participate; an incomplete graph never starts replacement."""
+    records = list(reversed(result["refs"])) + [result["main"]]
+    if result.get("coverage_complete") is False or any(r.get("fatal") for r in records):
+        result["main"].setdefault("fatal", "参照处理不完整，禁止覆盖主图和参照")
+        return
+    if not overwrite_group(records, overwrite_cache):
+        result["main"].setdefault("fatal", "主图或参照备份/覆盖失败，未完成整套覆盖")
 
 
 def _attach_tag(p: Path) -> str:
@@ -434,7 +469,7 @@ def _rel_to(p: Path, root: Path) -> str | None:
 
 def process_with_xrefs(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool,
                        timeout: int, purge_rounds: int = 3, with_xref: bool = True,
-                       max_depth: int = 1, ref_cache: dict | None = None,
+                       max_depth: int | None = None, ref_cache: dict | None = None,
                        ref_outdir: Path | None = None) -> dict:
     """主图 + 外部参照一起处理。
 
@@ -448,8 +483,14 @@ def process_with_xrefs(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool,
     xout = ref_outdir if ref_outdir is not None else outdir / "外部参照"
     refs: list[dict] = []
 
-    main_r = pipeline(dwg, outdir, do_repair, do_clean, timeout, purge_rounds,
-                      label=dwg.stem, stage_room=with_xref)
+    outdir.mkdir(parents=True, exist_ok=True)
+    if dwg.resolve() not in ref_cache:
+        ref_cache[dwg.resolve()] = pipeline(dwg, outdir, do_repair, do_clean, timeout, purge_rounds,
+                                          label=dwg.stem, stage_room=with_xref)
+    main_r = dict(ref_cache[dwg.resolve()])
+    for key, phase in (("before", "修复前"), ("after", "修复后")):
+        if main_r.get(key, {}).get("report_md"):
+            (outdir / f"{dwg.stem}-体检报告-{phase}.md").write_text(main_r[key]["report_md"], encoding="utf-8")
     result = {"main": main_r, "refs": refs, "root": str(root), "bundle": None}
     if main_r.get("fatal") or not with_xref:
         return result
@@ -457,7 +498,7 @@ def process_with_xrefs(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool,
     frontier = [(main_r, 0)]
     while frontier:
         parent_r, depth = frontier.pop(0)
-        if depth >= max_depth:
+        if max_depth is not None and depth >= max_depth:
             continue
         for x in parent_r.get("xrefs") or []:
             if not x.get("path"):
@@ -488,13 +529,13 @@ def process_with_xrefs(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool,
                 frontier.append((r, depth + 1))
 
     # A reference reached at the depth limit may still depend on unprocessed drawings.
-    incomplete = any(r.get("xrefs") for r in refs if r.get("xrefs") and
-                     any(x.get("path") and Path(x["path"]).resolve() not in seen
-                         for x in r["xrefs"]))
+    incomplete = any(not x.get("path") or Path(x["path"]).resolve() not in seen
+                     for record in [main_r] + refs for x in record.get("xrefs", []))
     if any(r.get("absolute_xref") for r in refs):
         result["bundle_warning"] = "参照含绝对路径，未重写 DWG 路径，不生成可移植整包"
     elif incomplete:
         result["bundle_warning"] = "达到递归深度，仍有未处理参照，不生成整包"
+    result["coverage_complete"] = not incomplete and not any(r.get("fatal") for r in refs)
     if do_repair and not result.get("bundle_warning") and all(not r.get("fatal") and r.get("output_dwg") and r.get("rel")
                          for r in refs):
         result["bundle"] = build_bundle(outdir, dwg, main_r, refs)
@@ -551,6 +592,8 @@ def write_xref_table(outdir: Path, dwg: Path, refs: list[dict], bundle) -> None:
         res = "体检"
         if r.get("output_dwg"):
             res = "已清理" if a and a["counts"] != b["counts"] else "无需处理"
+        if r.get("overwrite"):
+            res += f"；已覆盖，备份 {r['overwrite']['backup_path']}，SHA-256 {r['overwrite']['backup_sha256']}"
         L.append(f"| {Path(r['input']).name} | {r.get('rel') or '（目录外）'} | "
                  f"{Path(r['input']).stat().st_size // 1024} | "
                  f"{b['counts']['error']} | {b['counts']['warn']} | {n_txt} | {res} |")
@@ -667,7 +710,7 @@ LICENSE_HINTS = ("许可证", "License", "许可管理器", "Sign in", "未授�
 
 
 def _print_judge(dwg: Path, stampdir: Path, label: str, tag: str, timeout: int,
-                 attach_from: Path | None = None) -> dict:
+                 attach_from: Path | None = None, reference_context=None) -> dict:
     """打印法判定（唯一可用）：打成 PDF，看四边有没有那行 AUTODESK 水印。
 
     2026-11-25 校准：同一张图，2020 内核打印，原件四边有 AUTODESK（0.6~0.8%），
@@ -681,7 +724,7 @@ def _print_judge(dwg: Path, stampdir: Path, label: str, tag: str, timeout: int,
     """
     import eduprint
     r = eduprint.check_one(find_acc(), dwg, stampdir, 150, timeout,
-                           attach_from=attach_from)
+                           attach_from=attach_from, reference_context=reference_context)
     if r.get("fatal"):
         return {"stamped": None, "method": "print", "fatal": r["fatal"],
                 "log_tail": r.get("log_tail", "")}
@@ -700,7 +743,7 @@ def _print_judge(dwg: Path, stampdir: Path, label: str, tag: str, timeout: int,
 
 def edu_strip(dwg: Path, outdir: Path, timeout: int, do_audit: bool = True,
               strip_acc: str | None = None, label: str | None = None,
-              verify: str = "print") -> dict:
+              verify: str = "print", reference_context=None) -> dict:
     """去教育版戳：打印判定 → 2022+ 内核打开并另存 → 再打印验收。
 
     唯一有官方背书的路径就是「2022 或更高版本打开图纸并保存」，
@@ -737,7 +780,7 @@ def edu_strip(dwg: Path, outdir: Path, timeout: int, do_audit: bool = True,
     saved = work / "fixed.dwg"
 
     # ---- 处理前 ----
-    before = (_print_judge(staged, stampdir, label, "前", timeout, dwg.parent)
+    before = (_print_judge(staged, stampdir, label, "前", timeout, dwg.parent, reference_context)
               if verify != "none" else {"stamped": None, "method": "none"})
     res["before"] = before
 
@@ -788,7 +831,7 @@ def edu_strip(dwg: Path, outdir: Path, timeout: int, do_audit: bool = True,
         return res
 
     # ---- 处理后验收 ----
-    after = (_print_judge(saved, stampdir, label, "后", timeout, dwg.parent)
+    after = (_print_judge(saved, stampdir, label, "后", timeout, dwg.parent, reference_context)
              if verify != "none" else {"stamped": None, "method": "none"})
     res["after"] = after
     res["clean"] = after.get("stamped") is False
@@ -823,14 +866,14 @@ def _expand_targets(paths: list, include_attach: bool = False) -> list:
             for f in sorted(p.rglob("*")):
                 if f.suffix.lower() != ".dwg" or not f.is_file():
                     continue
-                if _is_product(f):
+                if f.name.endswith(PRODUCT_SUFFIXES) or any(part.lower() in OUTPUT_DIR_NAMES for part in f.relative_to(p).parts[:-1]):
                     continue
                 if not include_attach and any(part.lower().endswith(".dwg.attach") for part in f.parts):
                     continue
                 out.append(f)
         else:
             out.append(p)
-    return out
+    return list(dict.fromkeys(p.resolve() for p in out))
 
 
 def _verdict(d: dict | None) -> str:
@@ -881,8 +924,8 @@ def print_edu_strip(r: dict):
 
 def write_edu_strip_report(outdir: Path, rows: list, strip_acc: str,
                            verify: str = "print") -> Path:
-    ok = sum(1 for r in rows if r.get("clean"))
-    skip = sum(1 for r in rows if r.get("skipped") and not r.get("need_kernel"))
+    ok = sum(1 for r in rows if r.get("clean") and not r.get("fatal"))
+    skip = sum(1 for r in rows if r.get("skipped") and not r.get("need_kernel") and not r.get("fatal"))
     need = sum(1 for r in rows if r.get("need_kernel"))
     bad = len(rows) - ok - skip - need
     L = ["# 去教育版戳 报告\n",
@@ -921,7 +964,7 @@ def write_edu_strip_report(outdir: Path, rows: list, strip_acc: str,
 
 def detect_edu(path: Path) -> list:
     """[已废弃] 字节特征扫描。DWG 数据段是压缩的，带戳样本里也搜不到，
-    实测官方 EDU 样本'未检出'。保留只为兼容，判定一律用 check_edu()。
+    实测官方 EDU 样本'未检出'。保留只为兼容，判定使用 eduprint 打印检查。
     返回命中列表 [(bytes, 说明, 次数, 首次偏移)]"""
     try:
         b = path.read_bytes()
@@ -1022,7 +1065,7 @@ def main():
     ap.add_argument("--out", default=None, help="输出目录，默认与 DWG 同级 dwg-check/")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--purge-rounds", type=int, default=3)
-    ap.add_argument("--force", action="store_true", help="deedu 时即使未检出也强制走一遍往返")
+    ap.add_argument("--force", action="store_true", help="旧兼容参数；deedu 现已转到原生 edustrip 流程")
     ap.add_argument("--no-clean", action="store_true", help="只做 AUDIT/PURGE，不删除零长线和空文字")
     ap.add_argument("--no-audit", action="store_true", help="edustrip 时只另存，不跑 AUDIT")
     ap.add_argument("--verify", choices=["print", "none"], default="print",
@@ -1030,8 +1073,8 @@ def main():
                          "none=只清不验（快，但没有证据）")
     ap.add_argument("--no-xref", action="store_true",
                     help="不处理外部参照（educheck 时也不带参照目录复制）。默认会一并处理")
-    ap.add_argument("--xref-depth", type=int, default=1,
-                    help="外部参照递归层数：1=只处理主图的直接参照（默认），2=参照的参照也处理")
+    ap.add_argument("--xref-depth", type=int, default=None,
+                    help="参照递归层数，默认不限；设置上限导致未完整处理时返回失败")
     ap.add_argument("--keep-temp", action="store_true",
                     help="保留 %%TEMP%%\\dwgfix 下的中间件（默认跑完删除）")
     ap.add_argument("--acc", default=None, metavar="PATH",
@@ -1042,9 +1085,9 @@ def main():
                          "默认自动发现最高的合格版本")
     ap.add_argument("--overwrite", action="store_true", help="验收通过后备份并校验原图，再覆盖；默认保留原图")
     ns = ap.parse_args()
-    if ns.overwrite and ns.mode not in ("repair", "all", "edustrip"):
+    if ns.overwrite and ns.mode not in ("repair", "all", "edustrip", "deedu"):
         ap.error("--overwrite 只用于 repair/all/edustrip")
-    if ns.overwrite and ns.mode == "edustrip" and ns.verify != "print":
+    if ns.overwrite and ns.mode in ("edustrip", "deedu") and ns.verify != "print":
         ap.error("覆盖原图必须使用 --verify print")
 
     global _ACC_OVERRIDE, _STRIP_ACC_OVERRIDE
@@ -1062,47 +1105,39 @@ def main():
         if not f.exists():
             raise SystemExit(f"文件不存在：{f}")
 
+    if ns.mode == "deedu":
+        print("deedu 已废弃，改用 edustrip 的原版本保存与打印验收流程")
+        ns.mode = "edustrip"
+    if ns.mode == "educheck":
+        args = [sys.executable, str(Path(__file__).with_name("eduprint.py")), "check", *[str(p) for p in files], "--timeout", str(ns.timeout)]
+        if ns.out: args += ["--out", ns.out]
+        if ns.acc: args += ["--acc", ns.acc]
+        if ns.no_xref: args.append("--no-xref")
+        if ns.xref_depth is not None: args += ["--xref-depth", str(ns.xref_depth)]
+        raise SystemExit(subprocess.run(args).returncode)
+
     if ns.mode == "edustrip":
         outdir = Path(ns.out) if ns.out else files[0].parent / "dwg-check"
+        from edu_workflow import run_edu_graph
         targets = _expand_targets(files, include_attach=not ns.no_xref)
         if not targets:
             raise SystemExit("没有找到任何 .dwg")
-        judge_acc = find_acc()                      # 打印判定用的内核（2020，商业版）
+        judge_acc = find_acc()
         try:
-            strip_acc = find_acc(EDU_STRIP_MIN_YEAR)    # 清戳内核：必须 2022+
+            strip_acc = find_acc(EDU_STRIP_MIN_YEAR)
         except SystemExit:
             strip_acc = ""
-        if strip_acc:
-            print(f"判定内核（打印）：{judge_acc}\n清戳内核：{strip_acc}")
-        else:
-            print(f"判定内核（打印）：{judge_acc}\n清戳内核：无（本机没有 {EDU_STRIP_MIN_YEAR}+，只判定不清戳）")
-        if ns.verify == "none":
-            print("!! --verify none：只清不验，结果没有证据，别拿这个交活")
-        n_ref = sum(1 for t in targets
-                    if any(part.lower().endswith(".dwg.attach") for part in t.parts))
-        print(f"目标：{len(targets)} 张" + (f"（其中外部参照 {n_ref} 张）" if n_ref else "")
-              + "，串行处理（accoreconsole 并发会抢 profile，不能并行）")
-        rows = []
-        used: set = set()
-        for t in targets:
-            label = t.stem
-            if label in used:
-                label = f"{_attach_tag(t) or t.parent.name}_{label}"
-            used.add(label)
-            source_hash = sha256(t) if ns.overwrite else None
-            r = edu_strip(t, outdir, ns.timeout, do_audit=not ns.no_audit,
-                          strip_acc=strip_acc, label=label, verify=ns.verify)
-            if ns.overwrite:
-                overwrite_result(r, source_hash)
-            rows.append(r)
-            print_edu_strip(r)
-            if not ns.keep_temp:
-                shutil.rmtree(str(r["work"]), ignore_errors=True)
+        print(f"判定内核：{judge_acc}\n清戳内核：{strip_acc or '无'}；默认递归处理全部 DWG 参照")
+        rows = run_edu_graph(targets, outdir, ns, strip_acc)
+        for row in rows:
+            print_edu_strip(row)
+            if row.get("bundle"): print(f"整包：{row['bundle']}")
+            if row.get("bundle_warning"): print(f"!! {row['bundle_warning']}")
         rep = write_edu_strip_report(outdir, rows, strip_acc, ns.verify)
         (outdir / "edustrip.json").write_text(
             json.dumps(rows, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        ok = sum(1 for r in rows if r.get("clean"))
-        skip = sum(1 for r in rows if r.get("skipped") and not r.get("need_kernel"))
+        ok = sum(1 for r in rows if r.get("clean") and not r.get("fatal"))
+        skip = sum(1 for r in rows if r.get("skipped") and not r.get("need_kernel") and not r.get("fatal"))
         need = sum(1 for r in rows if r.get("need_kernel"))
         bad = len(rows) - ok - skip - need
         print(f"\n{'=' * 58}\n合计 {len(rows)} 张：已去戳 {ok}，本来就干净 {skip}，"
@@ -1114,36 +1149,10 @@ def main():
     dwg = files[0]
     outdir = Path(ns.out) if ns.out else dwg.parent / "dwg-check"
 
-    if ns.mode == "educheck":
-        print("!! educheck 的「按 ENTER 键继续」判据已作废（那是 SYSVARMONITOR 提示），"
-              "结果不可信；要定论请用 eduprint.py check")
-        rows = []
-        for f in files:
-            r = check_edu(f, ns.timeout, with_xref=not ns.no_xref)
-            rows.append(r)
-            tag = "★★ 报带戳" if r["stamped"] else "  报干净"
-            extra = f"（参照目录 {len(r['xref_dirs'])} 个）" if r["xref_dirs"] else ""
-            print(f"{tag}  {f.name}{extra}")
-        print(f"\n合计 {len(rows)} 张，带戳 {sum(r['stamped'] for r in rows)} 张")
-        (outdir / "educheck.json").parent.mkdir(parents=True, exist_ok=True)
-        (outdir / "educheck.json").write_text(
-            json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-        clean_rooms()
-        return
-
-    if ns.mode == "deedu":
-        outdir.mkdir(parents=True, exist_ok=True)
-        r = strip_edu(dwg, outdir, ns.timeout, ns.force)
-        (outdir / f"{dwg.stem}-deedu.json").write_text(
-            json.dumps(r, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        print_edu(r)
-        if r.get("fatal"):
-            raise SystemExit(1)
-        return
-
     do_repair = ns.mode in ("repair", "all")
     do_clean = (not ns.no_clean) and do_repair
     ref_cache: dict = {}
+    overwrite_cache: dict = {}
     failed: list = []
     for i, dwg in enumerate(files):
         if len(files) > 1:
@@ -1155,15 +1164,15 @@ def main():
                                  max_depth=ns.xref_depth, ref_cache=ref_cache,
                                  ref_outdir=outdir / "外部参照")
         if ns.overwrite:
-            if any(r.get("fatal") for r in res["refs"]):
-                res["main"]["fatal"] = "参照处理失败，禁止覆盖原图"
-            overwrite_result(res["main"], source_hash)
+            res["main"].setdefault("source_sha256", source_hash)
+            overwrite_operation(res, overwrite_cache)
+            write_xref_table(drawing_out, dwg, res["refs"], res.get("bundle"))
         (drawing_out / f"{dwg.stem}-report.json").write_text(
             json.dumps(res, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         print_summary(res["main"])
         if res.get("bundle_warning"):
             print("!! " + res["bundle_warning"])
-        if any(r.get("fatal") for r in [res["main"]] + res["refs"]):
+        if res.get("coverage_complete") is False or any(r.get("fatal") for r in [res["main"]] + res["refs"]):
             failed.append(dwg.name)
         if res["refs"]:
             ok = sum(1 for r in res["refs"] if not r.get("fatal"))

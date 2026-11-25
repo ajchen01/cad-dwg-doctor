@@ -72,7 +72,8 @@ COMMON_SHX = ("hztxt.shx", "china.shx", "tssdchn.shx", "tssdeng.shx", "!hztxt.sh
               "hzfs.shx", "txt.shx", "simplex.shx", "romans.shx")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dwgpipe import find_acc, _is_product, _new_workdir  # noqa: E402  引擎发现只维护一份，别在这儿重复实现
+from dwgpipe import find_acc, _is_product, _new_workdir, discover_operation_graph, run_session, DWG_SAVE_FORMATS
+from xref_graph import print_snapshot_context  # noqa: E402  引擎发现只维护一份，别在这儿重复实现
 
 
 def _render_deps():
@@ -179,14 +180,14 @@ def _edge_stats(pdf: Path, dpi: int) -> tuple[dict, dict]:
                    "spread": round(spread, 2), "reason": reason}
 
 
-def _plot(acc: str, dwg: Path, work: Path, pdf: Path, timeout: int) -> tuple[int, str]:
+def _plot(acc: str, dwg: Path, work: Path, pdf: Path, timeout: int, prelude: str = "") -> tuple[int, str]:
     scr = work / "plot.scr"
     # 参数序列（2020 实测）：
     #   详细配置N / 布局名(空=模型) / 页面设置名(空) / 设备 / 文件名 / 保存设置N / 继续打印Y
     scr.write_text(
         '(setvar "FILEDIA" 0)\n'
         '(setvar "CMDDIA" 0)\n'
-        f'(vl-cmdf "_.-plot" "N" "" "" "DWG To PDF.pc3" "{pdf.as_posix()}" "N" "Y")\n'
+        + prelude + f'(vl-cmdf "_.-plot" "N" "" "" "DWG To PDF.pc3" "{pdf.as_posix()}" "N" "Y")\n'
         '(princ "\\n[MARK-PLOT-DONE]")\n'
         '(vl-cmdf "_.QUIT" "_Y")\n',
         encoding="ascii",
@@ -207,7 +208,7 @@ def _plot(acc: str, dwg: Path, work: Path, pdf: Path, timeout: int) -> tuple[int
 
 
 def check_one(acc: str, dwg: Path, outdir: Path, dpi: int, timeout: int,
-              attach_from: Path | None = None) -> dict:
+              attach_from: Path | None = None, reference_context=None) -> dict:
     # 工作目录必须是纯英文，accoreconsole 读脚本按本地 ANSI，中文路径会乱码
     work = _new_workdir("print_")
     work.mkdir(parents=True, exist_ok=True)
@@ -250,9 +251,20 @@ def check_one(acc: str, dwg: Path, outdir: Path, dpi: int, timeout: int,
         res["fatal"] = f"缺少打印分析依赖：{exc}；请安装 requirements.txt"
         return res
     pdf = work / "out.pdf"
-    rc, log = _plot(acc, staged, work, pdf, timeout)
+    prelude = ""
+    if reference_context:
+        try:
+            prelude = print_snapshot_context(acc, reference_context['source'],
+                reference_context['graph'], reference_context['effective'], work, timeout, run_session, DWG_SAVE_FORMATS)
+        except Exception as exc:
+            res['fatal'] = f'参照打印上下文失败：{exc}'
+            return res
+    rc, log = _plot(acc, staged, work, pdf, timeout, prelude)
     (work / "session-plot.log").write_text(log, encoding="utf-8")
     res["rc"] = rc
+    if "\n[MARK-XREF-PATH-FAILED]" in log.replace("\r", ""):
+        res["fatal"] = "打印参照路径校验失败，未作判定"
+        return res
     if rc != 0 or not pdf.is_file():
         res["fatal"] = (f"打印会话失败或超时（退出码 {rc}），未作判定" if rc != 0
                         else "未生成 PDF（打印失败）")
@@ -285,12 +297,12 @@ def check_one(acc: str, dwg: Path, outdir: Path, dpi: int, timeout: int,
     return res
 
 
-def collect(paths: list[str]) -> list[Path]:
+def collect(paths: list[str], include_attach: bool = True) -> list[Path]:
     out = []
     for raw in paths:
         p = Path(raw)
         if p.is_dir():
-            out += sorted(x for x in p.rglob("*.dwg") if x.is_file() and not _is_product(x) and not any(part.lower().endswith(".dwg.attach") for part in x.parts))
+            out += sorted(x for x in p.rglob("*.dwg") if x.is_file() and not x.name.endswith(("-已修复.dwg","-已去戳.dwg","-已去教育版.dwg")) and not any(part.lower() in ("dwg-check","eduprint") or (not include_attach and part.lower().endswith(".dwg.attach")) for part in x.relative_to(p).parts[:-1]))
         elif p.is_file() and p.suffix.lower() == ".dwg":
             out.append(p)
     return out
@@ -306,21 +318,27 @@ def main() -> None:
     ap.add_argument("--acc", default=None, metavar="PATH",
                     help="accoreconsole.exe 路径。默认自动发现最老版本"
                          "（新版本可能是教育版授权，打印会给每张图盖戳）")
+    ap.add_argument("--no-xref", action="store_true", help="仅在明确排除参照时使用")
+    ap.add_argument("--xref-depth", type=int, default=None, help="默认不限深度；截断参照视为不完整")
     ns = ap.parse_args()
 
-    files = collect(ns.target)
+    files = collect(ns.target, include_attach=not ns.no_xref)
     if not files:
         raise SystemExit("没有找到 dwg")
     outdir = Path(ns.out) if ns.out else (files[0].parent / "eduprint")
     outdir.mkdir(parents=True, exist_ok=True)
     files = list(dict.fromkeys(f.resolve() for f in files))
     acc = find_acc(acc=ns.acc)
-    print(f"打印内核：{acc}\n目标 {len(files)} 张，输出：{outdir}")
-
-    rows = []
-    for index, f in enumerate(files, 1):
+    graph = discover_operation_graph(files, ns.timeout, not ns.no_xref, ns.xref_depth, acc=acc)
+    print(f"打印内核：{acc}\n目标 {len(graph['nodes'])} 张（含递归参照），输出：{outdir}")
+    rows = [dict(issue, input=issue.get('input') or issue['owner']) for issue in graph['issues']]
+    unreadable={Path(issue['input']) for issue in graph['issues'] if issue.get('input') and issue['input']==issue['owner']}
+    for index, f in enumerate(graph['nodes'], 1):
+        if f in unreadable:
+            continue
         print(f"\n… {f.name}", flush=True)
-        r = check_one(acc, f, outdir / f"{index:04d}-{f.stem}", ns.dpi, ns.timeout)
+        context = {"source": f, "graph": graph, "effective": {}} if not ns.no_xref else None
+        r = check_one(acc, f, outdir / f"{index:04d}-{f.stem}", ns.dpi, ns.timeout, reference_context=context)
         rows.append(r)
         if r.get("fatal"):
             print(f"   ✗ {r['fatal']}")

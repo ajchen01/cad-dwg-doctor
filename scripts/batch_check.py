@@ -20,8 +20,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from safe_overwrite import sha256, overwrite_result
-from dwgpipe import PRODUCT_SUFFIXES, process_with_xrefs  # noqa: E402
+from safe_overwrite import sha256
+from dwgpipe import PRODUCT_SUFFIXES, process_with_xrefs, overwrite_operation, write_xref_table  # noqa: E402
 
 
 def collect(root: Path, recursive: bool) -> list[Path]:
@@ -47,9 +47,9 @@ def main():
     ap.add_argument("--recursive", action="store_true")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--no-xref", action="store_true", help="不处理外部参照（默认处理）")
-    ap.add_argument("--xref-depth", type=int, default=1)
+    ap.add_argument("--xref-depth", type=int, default=None)
     ap.add_argument("--keep-temp", action="store_true")
-    ap.add_argument("--overwrite", action="store_true", help="需 --repair；先校验备份，再覆盖主图，不自动覆盖跟随参照")
+    ap.add_argument("--overwrite", action="store_true", help="需 --repair；主图和全部参照分别校验备份后覆盖")
     ns = ap.parse_args()
     if ns.overwrite and not ns.repair:
         ap.error("--overwrite 必须与 --repair 一起使用")
@@ -64,6 +64,7 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     rows, xrows = [], []
     ref_cache: dict = {}
+    overwrite_cache: dict = {}
     for p in files:
         drawing_out = outdir / "主图" / p.relative_to(root)
         t0 = time.time()
@@ -76,9 +77,11 @@ def main():
                                      ref_outdir=outdir / "外部参照")
             r = res["main"]
             if ns.overwrite:
-                if any(x.get("fatal") for x in res["refs"]):
-                    r["fatal"] = "参照处理失败，禁止覆盖原图"
-                overwrite_result(r, source_hash)
+                r.setdefault("source_sha256", source_hash)
+                overwrite_operation(res, overwrite_cache)
+                write_xref_table(drawing_out, p, res["refs"], res.get("bundle"))
+            if res.get("coverage_complete") is False:
+                r.setdefault("fatal", "参照处理不完整")
         except Exception as exc:
             rows.append(dict(name=p.name, kb=p.stat().st_size // 1024, fatal=f"{type(exc).__name__}: {exc}"))
             continue
@@ -94,7 +97,7 @@ def main():
                 err_after=a["counts"]["error"] if a else None,
                 cleaned=(xr.get("cleaned") or {}).get("emptytext", 0)
                         + (xr.get("cleaned") or {}).get("emptymtext", 0),
-                out=xr.get("output_dwg"),
+                out=xr.get("output_dwg"), overwrite=xr.get("overwrite"),
             ))
         if r.get("fatal"):
             rows.append(dict(name=p.name, kb=p.stat().st_size // 1024, fatal=r["fatal"]))
@@ -160,7 +163,7 @@ def main():
         xw = sum(r.get("warn", 0) for r in xrows)
         L.append(f"\n参照合计：**{xe} 错误 / {xw} 警告**\n")
 
-    replacements = [r for r in rows if r.get("overwrite")]
+    replacements = list({r["overwrite"]["original_path"]: r for r in rows + xrows if r.get("overwrite")}.values())
     if replacements:
         L += ["\n## 原图替换与备份\n"]
         for r in replacements:

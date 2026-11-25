@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def build(destination):
     destination = Path(destination).resolve()
-    files = [ROOT / p for p in ("SKILL.md", "README.md", "LICENSE", "requirements.txt", "docs/RELEASE-READINESS.md", "docs/demo-stamp.png", "docs/EDU-ACCEPTANCE-2026-11-25.md", "docs/edu-acceptance-before.png", "docs/edu-acceptance-after.png")]
+    files = [ROOT / p for p in ("SKILL.md", "README.md", "LICENSE", "requirements.txt", "docs/RELEASE-READINESS.md", "docs/demo-stamp.png", "docs/EDU-ACCEPTANCE-2026-11-25.md", "docs/edu-acceptance-before.png", "docs/edu-acceptance-after.png", "docs/XREF-ACCEPTANCE-2026-11-25.md")]
     for directory, pattern in (("agents", "*.yaml"), ("references", "*.md"), ("scripts", "*.py")):
         files.extend(sorted((ROOT / directory).glob(pattern)))
     if destination in files:

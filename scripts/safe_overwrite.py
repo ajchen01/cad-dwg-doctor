@@ -80,3 +80,29 @@ def overwrite_result(result: dict, expected_sha256: str) -> None:
         result['overwrite'] = replace_with_backup(Path(result['input']), Path(result['output_dwg']), expected_sha256)
     except (OSError, ValueError) as exc:
         result['fatal'] = f'备份/覆盖失败：{exc}'
+
+
+def overwrite_group(records, cache):
+    """Replace dependencies before their host; shared inputs get one backup per run."""
+    if any(r.get('fatal') for r in records):
+        return False
+    for result in records:
+        if result.get('skipped'):
+            continue
+        source = str(Path(result['input']).resolve())
+        if source in cache:
+            if sha256(Path(source)) != cache[source]['output_sha256']:
+                result['fatal'] = '已处理参照在本次任务中再次变化，禁止重复覆盖'
+                return False
+            result['overwrite'] = cache[source]
+            continue
+        expected = result.get('source_sha256')
+        if not expected:
+            result['fatal'] = '缺少处理前原件指纹，禁止覆盖'
+            return False
+        overwrite_result(result, expected)
+        if result.get('fatal'):
+            return False
+        if result.get('overwrite'):
+            cache[source] = result['overwrite']
+    return True
