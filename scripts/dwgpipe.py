@@ -724,6 +724,14 @@ def edu_strip(dwg: Path, outdir: Path, timeout: int, do_audit: bool = True,
     res = {"input": str(dwg), "label": label, "work": str(work), "verify": verify,
            "strip_acc": strip_acc, "size_before": dwg.stat().st_size}
 
+    version = dwg_version(staged)
+    res["dwg_version_before"] = version.decode("ascii", "replace")
+    save_format = DWG_SAVE_FORMATS.get(version)
+    if save_format is None:
+        res["fatal"] = f"无法按原 DWG 版本保存：{version!r}，未执行清戳"
+        return res
+    saved = work / "fixed.dwg"
+
     # ---- 处理前 ----
     before = (_print_judge(staged, stampdir, label, "前", timeout, dwg.parent)
               if verify != "none" else {"stamped": None, "method": "none"})
@@ -744,27 +752,39 @@ def edu_strip(dwg: Path, outdir: Path, timeout: int, do_audit: bool = True,
 
     # 2022 打开带戳图时，那个「学生版-检测到打印戳记」框同样会被压平成
     # 「按 ENTER 键继续:」，它会吃掉一行输入。所以：前面留两个空行吸收，
-    # 关键命令（QSAVE）前再设一次 FILEDIA，别指望开头那几行还在。
+    # 关键命令（SAVEAS）前再设一次 FILEDIA，别指望开头那几行还在。
     s = ["\n\n", PRELUDE]
     if do_audit:
         s.append('(vl-cmdf "_.AUDIT" "_Y")\n(princ "\\n[MARK-AUDIT]")\n')
     s.append('(setvar "FILEDIA" 0)\n(setvar "CMDDIA" 0)\n')
-    s.append('(vl-cmdf "_.QSAVE")\n(princ "\\n[MARK-QSAVE]")\n')
+    s.append(f'(vl-cmdf "_.SAVEAS" "{save_format}" "{saved.as_posix()}")\n'
+             + '(princ "\\n[MARK-SAVEAS]")\n')
     scr = work / "strip.scr"
     scr.write_text("".join(s), encoding="ascii")
-    rc, out = run_session(strip_acc, staged, scr, timeout, work / "strip.log")
+    try:
+        rc, out = run_session(strip_acc, staged, scr, timeout, work / "strip.log")
+    except subprocess.TimeoutExpired:
+        res["fatal"] = f"清戳会话超时（{timeout} 秒），未发布成品"
+        return res
 
     res["rc"] = rc
     res["audited"] = "[MARK-AUDIT]" in out
-    res["qsaved"] = "[MARK-QSAVE]" in out
+    res["saved"] = "[MARK-SAVEAS]" in out
+    res["save_method"] = "SAVEAS"
     res["notes"] = [h for h in LICENSE_HINTS if h in out][:3]
 
-    if rc != 0 or not res["qsaved"]:
+    if rc != 0 or not res["saved"] or not saved.is_file():
         res["fatal"] = f"清戳会话失败或未保存（退出码 {rc}），未发布成品"
         return res
 
+    saved_version = dwg_version(saved)
+    res["dwg_version_after"] = saved_version.decode("ascii", "replace")
+    if saved_version != version:
+        res["fatal"] = f"DWG 版本发生变化：{version!r} → {saved_version!r}，未发布成品"
+        return res
+
     # ---- 处理后验收 ----
-    after = (_print_judge(staged, stampdir, label, "后", timeout, dwg.parent)
+    after = (_print_judge(saved, stampdir, label, "后", timeout, dwg.parent)
              if verify != "none" else {"stamped": None, "method": "none"})
     res["after"] = after
     res["clean"] = after.get("stamped") is False
@@ -773,7 +793,7 @@ def edu_strip(dwg: Path, outdir: Path, timeout: int, do_audit: bool = True,
         res["fatal"] = "处理后打印未通过，未发布成品"
         return res
     out_dwg = outdir / f"{label}-已去戳.dwg"
-    shutil.copy2(staged, out_dwg)
+    shutil.copy2(saved, out_dwg)
     res["output_dwg"] = str(out_dwg)
     res["size_after"] = out_dwg.stat().st_size
     return res
@@ -840,8 +860,9 @@ def print_edu_strip(r: dict):
               + (f"　边条暗像素 {b['worst']}% → {a['worst']}%"
                  if b.get("worst") is not None and a.get("worst") is not None else ""))
     print(f"  内核：{r['strip_acc']}")
-    if not r.get("qsaved"):
-        print("  !! QSAVE 没跑到，另存可能失败（看 " + r["work"] + r"\\strip.log）")
+    print(f"  DWG 版本：{r.get('dwg_version_before')} → {r.get('dwg_version_after')}")
+    if not r.get("saved"):
+        print("  !! SAVEAS 未完成（看 " + r["work"] + r"\\strip.log）")
     if r.get("notes"):
         print(f"  !! 2022 疑似授权问题：{'/'.join(r['notes'])}")
     if a.get("fatal"):
@@ -874,7 +895,8 @@ def write_edu_strip_report(outdir: Path, rows: list, strip_acc: str,
         b, a = r.get("before", {}), r.get("after", {})
         edge = (f"{b['worst']} → {a['worst']}"
                 if b.get("worst") is not None and a.get("worst") is not None else "—")
-        res = "已去戳" if r.get("clean") else "**仍带戳，需人工**"
+        res = "已去戳" if r.get("clean") else "未验证"
+        res += f"（DWG {r.get('dwg_version_before')} → {r.get('dwg_version_after')}）"
         L.append(f"| {r['label']} | {_verdict(b)} | {_verdict(a)} | {edge} | "
                  f"{r['size_after'] // 1024} | {res} |")
     L.append("")
@@ -907,6 +929,11 @@ def detect_edu(path: Path) -> list:
 
 def strip_edu(dwg: Path, outdir: Path, timeout: int, force: bool = False) -> dict:
     """DXF 往返重建数据库，输出到新文件，原图不动"""
+    version = dwg_version(dwg)
+    save_format = DWG_SAVE_FORMATS.get(version)
+    if save_format is None:
+        return {"input": str(dwg), "dwg_version_before": version.decode("ascii", "replace"),
+                "fatal": f"无法按原 DWG 版本保存：{version!r}"}
     acc = find_acc()
     work = Path(tempfile.gettempdir()) / "dwgfix" / f"edu_{time.strftime('%H%M%S')}_{os.getpid()}"
     work.mkdir(parents=True, exist_ok=True)
@@ -914,7 +941,7 @@ def strip_edu(dwg: Path, outdir: Path, timeout: int, force: bool = False) -> dic
     shutil.copy2(dwg, src)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    res = {"input": str(dwg), "before": detect_edu(dwg), "work": str(work), "forced": force}
+    res = {"input": str(dwg), "before": detect_edu(dwg), "work": str(work), "forced": force, "dwg_version_before": version.decode("ascii", "replace")}
 
     # 步骤 1：DWG -> DXF
     scr1 = work / "to_dxf.scr"
@@ -935,7 +962,7 @@ def strip_edu(dwg: Path, outdir: Path, timeout: int, force: bool = False) -> dic
 
     # 步骤 3：DXF -> DWG（SAVEAS 必须先给格式再给文件名，反序会挂死）
     scr2 = work / "to_dwg.scr"
-    scr2.write_text(PRELUDE + f'(vl-cmdf "_.SAVEAS" "2018" "{(work / "out.dwg").as_posix()}")\n'
+    scr2.write_text(PRELUDE + f'(vl-cmdf "_.SAVEAS" "{save_format}" "{(work / "out.dwg").as_posix()}")\n'
                     + r'(princ "\n[MARK-END]")' + "\n", encoding="ascii")
     run_session(acc, clean_dxf, scr2, timeout, work / "s2.log")
 
@@ -944,6 +971,11 @@ def strip_edu(dwg: Path, outdir: Path, timeout: int, force: bool = False) -> dic
         res["fatal"] = "回写 DWG 失败（SAVEAS 未产出文件）"
         return res
 
+    saved_version = dwg_version(produced)
+    res["dwg_version_after"] = saved_version.decode("ascii", "replace")
+    if saved_version != version:
+        res["fatal"] = f"DWG 版本发生变化：{version!r} → {saved_version!r}，未发布成品"
+        return res
     out = outdir / f"{dwg.stem}-已去教育版.dwg"
     shutil.copy2(produced, out)
     res["output_dwg"] = str(out)
@@ -1084,10 +1116,13 @@ def main():
         return
 
     if ns.mode == "deedu":
+        outdir.mkdir(parents=True, exist_ok=True)
         r = strip_edu(dwg, outdir, ns.timeout, ns.force)
         (outdir / f"{dwg.stem}-deedu.json").write_text(
             json.dumps(r, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         print_edu(r)
+        if r.get("fatal"):
+            raise SystemExit(1)
         return
 
     do_repair = ns.mode in ("repair", "all")

@@ -64,10 +64,14 @@ class RegressionTests(unittest.TestCase):
             root = Path(tmp)
             src = root / 'a.dwg'
             src.write_bytes(b'AC1032original')
-            with patch.object(dwgpipe, '_new_workdir', return_value=root), patch.object(dwgpipe, '_print_judge', side_effect=[{'stamped': True}, {'stamped': None, 'fatal': 'bad pdf'}]), patch.object(dwgpipe, 'run_session', return_value=(0, '[MARK-QSAVE]')):
+            def save(*args):
+                (root / 'fixed.dwg').write_bytes(b'AC1032clean')
+                return 0, '[MARK-SAVEAS]'
+            with patch.object(dwgpipe, '_new_workdir', return_value=root), patch.object(dwgpipe, '_print_judge', side_effect=[{'stamped': True}, {'stamped': None, 'fatal': 'bad pdf'}]) as judge, patch.object(dwgpipe, 'run_session', side_effect=save):
                 r = dwgpipe.edu_strip(src, root / 'out', 10, strip_acc='dummy')
             self.assertIn('fatal', r)
             self.assertNotIn('output_dwg', r)
+            self.assertEqual(judge.call_count, 2)
 
     def test_nonzero_plot_cannot_be_classified(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,6 +82,70 @@ class RegressionTests(unittest.TestCase):
                 r = eduprint.check_one('dummy', src, root / 'out', 150, 10)
             self.assertIn('fatal', r)
             analyze.assert_not_called()
+
+class EduVersionTests(unittest.TestCase):
+    def test_strip_preserves_2010_version_even_without_print_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / 'a.dwg'
+            src.write_bytes(b'AC1024original')
+            def save(*args):
+                (root / 'fixed.dwg').write_bytes(b'AC1024clean')
+                return 0, '[MARK-SAVEAS]'
+            with patch.object(dwgpipe, '_new_workdir', return_value=root), patch.object(dwgpipe, 'run_session', side_effect=save):
+                result = dwgpipe.edu_strip(src, root / 'out', 10, strip_acc='dummy', verify='none')
+            self.assertNotIn('fatal', result)
+            self.assertEqual(Path(result['output_dwg']).read_bytes(), b'AC1024clean')
+            self.assertEqual(result['dwg_version_before'], 'AC1024')
+            self.assertEqual(result['dwg_version_after'], 'AC1024')
+            self.assertEqual(src.read_bytes(), b'AC1024original')
+
+    def test_strip_rejects_changed_version_before_postprint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / 'a.dwg'
+            src.write_bytes(b'AC1024original')
+            def save(*args):
+                (root / 'fixed.dwg').write_bytes(b'AC1032upgraded')
+                return 0, '[MARK-SAVEAS]'
+            with patch.object(dwgpipe, '_new_workdir', return_value=root), patch.object(dwgpipe, '_print_judge', return_value={'stamped': True}) as judge, patch.object(dwgpipe, 'run_session', side_effect=save):
+                result = dwgpipe.edu_strip(src, root / 'out', 10, strip_acc='dummy')
+            self.assertIn('fatal', result)
+            self.assertEqual(result.get('dwg_version_after'), 'AC1032')
+            self.assertNotIn('output_dwg', result)
+            self.assertEqual(judge.call_count, 1)
+            self.assertFalse((root / 'out/a-已去戳.dwg').exists())
+
+    def test_strip_rejects_unknown_version_without_running_autocad(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / 'a.dwg'
+            src.write_bytes(b'BADHDRoriginal')
+            with patch.object(dwgpipe, '_new_workdir', return_value=root), patch.object(dwgpipe, 'run_session', return_value=(1, '')) as run, patch.object(dwgpipe, '_print_judge') as judge:
+                result = dwgpipe.edu_strip(src, root / 'out', 10, strip_acc='dummy', verify='none')
+            self.assertIn('fatal', result)
+            self.assertNotIn('output_dwg', result)
+            run.assert_not_called()
+            judge.assert_not_called()
+
+class LegacyVersionTests(unittest.TestCase):
+    def test_legacy_conversion_rejects_changed_version(self):
+        import ezdxf
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / 'a.dwg'
+            src.write_bytes(b'AC1024original')
+            def session(acc, drawing, script, timeout, log):
+                if script.name == 'to_dxf.scr':
+                    ezdxf.new().saveas(script.parent / 'raw.dxf')
+                else:
+                    (script.parent / 'out.dwg').write_bytes(b'AC1032upgraded')
+                return 0, '[MARK-END]'
+            with patch.object(dwgpipe, 'find_acc', return_value='dummy'), patch.object(dwgpipe, 'run_session', side_effect=session), patch.object(dwgpipe.tempfile, 'gettempdir', return_value=str(root)):
+                result = dwgpipe.strip_edu(src, root / 'out', 10)
+            self.assertIn('fatal', result)
+            self.assertNotIn('output_dwg', result)
+            self.assertFalse((root / 'out/a-已去教育版.dwg').exists())
 
 class BundleTests(unittest.TestCase):
     def run_case(self, raw, nested=False):

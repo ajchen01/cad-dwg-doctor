@@ -11,7 +11,7 @@ description: 检查、修复和清理 Windows AutoCAD DWG 图纸，生成 DXF �
 
 - 用户只要求分析、检查、体检时运行 `audit`。
 - 用户要求修复时运行 `repair`；要求修复并清理时运行 `all`。两者目前均执行 AUDIT/PURGE，默认删除零长线和空文字；`--no-clean` 保留这些实体。
-- 教育版打印戳记检查使用 `eduprint.py check`。只有用户明确要求清戳且具备相应文件处理权限时使用 `edustrip`；需要 AutoCAD 2022+。去戳不改变文件的许可资格。`edustrip` 重存可能升级 DWG 格式，旧版本交付要求需单独验收。
+- 教育版打印戳记检查使用 `eduprint.py check`。只有用户明确要求清戳且具备相应文件处理权限时使用 `edustrip`；需要 AutoCAD 2022+。去戳不改变文件的许可资格。所有 DWG 输出必须保持输入文件头所标识的 DWG 格式版本。`edustrip` 同样按原版本 SAVEAS；无法保留或成品版本不一致时失败，不输出成品，禁止自动升级或降级。
 - 不自动删除重复图元、游离图元或修改设计几何。重复图元只报告，人工决定是否在 GUI 运行 OVERKILL。
 
 ## 执行与验收
