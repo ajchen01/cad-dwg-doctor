@@ -288,6 +288,17 @@ def parse_clean(txt: str) -> dict:
     return {k.lower(): int(v) for k, v in MARK_CLEAN_RE.findall(txt or "")}
 
 
+DWG_SAVE_FORMATS = {
+    b"AC1014": "R14", b"AC1015": "2000", b"AC1018": "2004",
+    b"AC1021": "2007", b"AC1024": "2010", b"AC1027": "2013", b"AC1032": "2018",
+}
+
+
+def dwg_version(path: Path) -> bytes:
+    with path.open("rb") as stream:
+        return stream.read(6)
+
+
 def pipeline(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool, timeout: int,
              purge_rounds: int = 3, label: str | None = None,
              stage_room: bool = False) -> dict:
@@ -298,6 +309,13 @@ def pipeline(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool, timeout: 
     shutil.copy2(dwg, src)
     outdir.mkdir(parents=True, exist_ok=True)
     result = {"input": str(dwg), "label": label, "work": str(work), "accoreconsole": acc}
+    version = dwg_version(src)
+    result["dwg_version_before"] = version.decode("ascii", "replace")
+    save_format = DWG_SAVE_FORMATS.get(version)
+    saved = work / "fixed.dwg"
+    if do_repair and save_format is None:
+        result["fatal"] = f"无法按原 DWG 版本保存：{version!r}"
+        return result
     if stage_room:
         rooms = _stage_room(work, dwg)
         if rooms:
@@ -309,18 +327,23 @@ def pipeline(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool, timeout: 
         scr_parts.append(_scr_audit_and_purge(purge_rounds))
         if do_clean:
             scr_parts.append(SCR_CLEAN)
-        scr_parts.append(r'(vl-cmdf "_.QSAVE")' + "\n" + r'(princ "\n[MARK-QSAVE]")' + "\n")
+        scr_parts.append(f'(vl-cmdf "_.SAVEAS" "{save_format}" "{saved.as_posix()}")\n'
+                         + r'(princ "\n[MARK-SAVEAS]")' + "\n")
         scr_parts.append(dxfout((work / "after.dxf").as_posix(), "AFTER"))
     scr_parts.append(r'(princ "\n[MARK-END]")' + "\n")
     scr = work / "run.scr"
     scr.write_text("".join(scr_parts), encoding="ascii")
 
-    rc, out = run_session(acc, src, scr, timeout, work / "session.log")
+    try:
+        rc, out = run_session(acc, src, scr, timeout, work / "session.log")
+    except subprocess.TimeoutExpired:
+        result["fatal"] = f"AutoCAD 会话超时（{timeout} 秒）"
+        return result
     result["rc"] = rc
     result["unresolved_xref"] = out.count("未找到")
 
     before_dxf, after_dxf = work / "before.dxf", work / "after.dxf"
-    if not before_dxf.exists():
+    if rc != 0 or "[MARK-DXF-BEFORE]" not in out or "[MARK-END]" not in out or not before_dxf.exists():
         result["fatal"] = ("导出 DXF 失败：文件可能损坏或版本过高。"
                            "先试 RECOVER 打开，或确认 accoreconsole 能读该 DWG 版本。")
         return result
@@ -330,14 +353,29 @@ def pipeline(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool, timeout: 
     result["xrefs"] = extract_xrefs(before_dxf, dwg.parent)
 
     if do_repair:
+        required = ["[MARK-AUDIT]", "[MARK-SAVEAS]", "[MARK-END]"]
+        if purge_rounds > 0:
+            required.append("[MARK-PURGE]")
+        if (rc != 0 or any(mark not in out for mark in required)
+                or not saved.is_file() or not after_dxf.is_file()):
+            result["fatal"] = f"修复会话未完成、未保存或缺少修后 DXF（退出码 {rc}）"
+            return result
+        saved_version = dwg_version(saved)
+        result["dwg_version_after"] = saved_version.decode("ascii", "replace")
+        if saved_version != version:
+            result["fatal"] = f"DWG 版本发生变化：{version!r} → {saved_version!r}"
+            return result
         adt = work / "in.adt"
         result["audit_log"] = parse_adt(adt)
         result["cleaned"] = parse_clean(out)
-        if after_dxf.exists():
+        try:
             result["after"] = summarize_dxf(after_dxf)
-            (outdir / f"{label}-体检报告-修复后.md").write_text(result["after"]["report_md"], encoding="utf-8")
+        except Exception as exc:
+            result["fatal"] = f"修后 DXF 无法复验：{exc}"
+            return result
+        (outdir / f"{label}-体检报告-修复后.md").write_text(result["after"]["report_md"], encoding="utf-8")
         fixed = outdir / f"{label}-已修复.dwg"
-        shutil.copy2(src, fixed)
+        shutil.copy2(saved, fixed)
         result["output_dwg"] = str(fixed)
         result["size_before"] = dwg.stat().st_size
         result["size_after"] = fixed.stat().st_size
@@ -394,7 +432,8 @@ def _rel_to(p: Path, root: Path) -> str | None:
 
 def process_with_xrefs(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool,
                        timeout: int, purge_rounds: int = 3, with_xref: bool = True,
-                       max_depth: int = 1, seen: set | None = None) -> dict:
+                       max_depth: int = 1, ref_cache: dict | None = None,
+                       ref_outdir: Path | None = None) -> dict:
     """主图 + 外部参照一起处理。
 
     参照走的是同一套流程（体检 / AUDIT / PURGE / 清理），报告落在 outdir/外部参照/，
@@ -402,19 +441,18 @@ def process_with_xrefs(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool,
     原图一律不动。
     """
     root = dwg.parent.resolve()
-    seen = set() if seen is None else seen
-    xout = outdir / "外部参照"
+    seen = {dwg.resolve()}
+    ref_cache = {} if ref_cache is None else ref_cache
+    xout = ref_outdir if ref_outdir is not None else outdir / "外部参照"
     refs: list[dict] = []
 
     main_r = pipeline(dwg, outdir, do_repair, do_clean, timeout, purge_rounds,
                       label=dwg.stem, stage_room=with_xref)
-    seen.add(dwg.resolve())
     result = {"main": main_r, "refs": refs, "root": str(root), "bundle": None}
     if main_r.get("fatal") or not with_xref:
         return result
 
     frontier = [(main_r, 0)]
-    used_labels = {dwg.stem}
     while frontier:
         parent_r, depth = frontier.pop(0)
         if depth >= max_depth:
@@ -432,20 +470,31 @@ def process_with_xrefs(dwg: Path, outdir: Path, do_repair: bool, do_clean: bool,
             if any(part.lower().endswith(".dwl") for part in pp.parts):
                 continue
             seen.add(pp)
-            label = pp.stem
-            if label in used_labels:
-                label = f"{_attach_tag(pp) or pp.parent.name}_{label}"
-            used_labels.add(label)
-            print(f"   └ 参照：{pp.name}", flush=True)
-            r = pipeline(pp, xout, do_repair, do_clean, timeout, purge_rounds,
-                         label=label, stage_room=True)
+            if pp not in ref_cache:
+                xout.mkdir(parents=True, exist_ok=True)
+                ref_dir = Path(tempfile.mkdtemp(prefix="xref-", dir=xout))
+                print(f"   └ 参照：{pp.name}", flush=True)
+                ref_cache[pp] = pipeline(pp, ref_dir, do_repair, do_clean, timeout,
+                                         purge_rounds, stage_room=True)
+            r = dict(ref_cache[pp])
             r["rel"] = _rel_to(pp, root)
+            r["xref_raw"] = x.get("raw", "")
+            r["absolute_xref"] = Path(x.get("raw", "")).is_absolute()
             r["is_xref"] = True
             refs.append(r)
             if not r.get("fatal"):
                 frontier.append((r, depth + 1))
 
-    if do_repair:
+    # A reference reached at the depth limit may still depend on unprocessed drawings.
+    incomplete = any(r.get("xrefs") for r in refs if r.get("xrefs") and
+                     any(x.get("path") and Path(x["path"]).resolve() not in seen
+                         for x in r["xrefs"]))
+    if any(r.get("absolute_xref") for r in refs):
+        result["bundle_warning"] = "参照含绝对路径，未重写 DWG 路径，不生成可移植整包"
+    elif incomplete:
+        result["bundle_warning"] = "达到递归深度，仍有未处理参照，不生成整包"
+    if do_repair and not result.get("bundle_warning") and all(not r.get("fatal") and r.get("output_dwg") and r.get("rel")
+                         for r in refs):
         result["bundle"] = build_bundle(outdir, dwg, main_r, refs)
     write_xref_table(outdir, dwg, refs, result["bundle"])
     return result
@@ -456,8 +505,9 @@ def build_bundle(outdir: Path, dwg: Path, main_r: dict, refs: list[dict]) -> str
     参照用相对路径寻址，散着放会全断。"""
     b = outdir / "整包-已修复"
     if b.exists():
-        shutil.rmtree(b, ignore_errors=True)
-    b.mkdir(parents=True, exist_ok=True)
+        b = Path(tempfile.mkdtemp(prefix="整包-已修复-", dir=outdir))
+    else:
+        b.mkdir(parents=True, exist_ok=False)
     n = 0
     if main_r.get("output_dwg"):
         shutil.copy2(main_r["output_dwg"], b / dwg.name)
@@ -484,6 +534,8 @@ def write_xref_table(outdir: Path, dwg: Path, refs: list[dict], bundle) -> None:
          f"主图：`{dwg}`　参照数：{len(refs)}\n"]
     if bundle:
         L.append(f"整包（主图 + 修好的参照，相对路径已保持）：`{bundle}`\n")
+    elif any(r.get("fatal") or (r.get("output_dwg") and not r.get("rel")) for r in refs):
+        L.append("部分参照不可用或无法纳入，未生成整包。\n")
     L += ["| 参照文件 | 相对路径 | 大小KB | 错误 | 警告 | 清理(空文字) | 结果 |",
           "|---|---|---|---|---|---|---|"]
     for r in refs:
@@ -533,7 +585,7 @@ def print_summary(r: dict):
 
 # ---------------- 教育版（EDU）处理 ----------------
 # EDU 标记是写进 DWG 数据库头的元数据，不在图元里，PURGE/WBLOCK 都动不了。
-# 唯一可靠路径：DXF 往返重建数据库（DXF 是纯文本，不携带那个二进制标识位）。
+# DXF 往返不能可靠去戳；历史模式仅保留兼容，不作为验收依据。
 # 注意 DWG 2018 的数据段是压缩的，字节扫描只能算一道不完全可靠的检查。
 EDU_FEATURES = [
     (b"ACAD_EDU", "ACAD_EDU 标识"),
@@ -677,6 +729,9 @@ def edu_strip(dwg: Path, outdir: Path, timeout: int, do_audit: bool = True,
               if verify != "none" else {"stamped": None, "method": "none"})
     res["before"] = before
 
+    if verify != "none" and before.get("stamped") is None:
+        res["fatal"] = "处理前打印判定失败，未执行清戳"
+        return res
     if before["stamped"] is False:
         res["skipped"] = ("判定为干净：打印件四边没有水印"
                           + (f"（边条暗像素 {before['worst']}% 来自图面内容）"
@@ -704,12 +759,19 @@ def edu_strip(dwg: Path, outdir: Path, timeout: int, do_audit: bool = True,
     res["qsaved"] = "[MARK-QSAVE]" in out
     res["notes"] = [h for h in LICENSE_HINTS if h in out][:3]
 
+    if rc != 0 or not res["qsaved"]:
+        res["fatal"] = f"清戳会话失败或未保存（退出码 {rc}），未发布成品"
+        return res
+
     # ---- 处理后验收 ----
     after = (_print_judge(staged, stampdir, label, "后", timeout, dwg.parent)
              if verify != "none" else {"stamped": None, "method": "none"})
     res["after"] = after
     res["clean"] = after.get("stamped") is False
 
+    if verify != "none" and not res["clean"]:
+        res["fatal"] = "处理后打印未通过，未发布成品"
+        return res
     out_dwg = outdir / f"{label}-已去戳.dwg"
     shutil.copy2(staged, out_dwg)
     res["output_dwg"] = str(out_dwg)
@@ -762,6 +824,9 @@ def _verdict(d: dict | None) -> str:
 def print_edu_strip(r: dict):
     print(f"\n{'-' * 58}")
     print(f"{r['label']}")
+    if r.get("fatal"):
+        print("  !! " + r["fatal"])
+        return
     if r.get("skipped"):
         print(f"  {r['skipped']}")
         return
@@ -799,6 +864,9 @@ def write_edu_strip_report(outdir: Path, rows: list, strip_acc: str,
          "| 文件 | 处理前 | 处理后 | 边条暗像素 | 大小KB | 结果 |",
          "|---|---|---|---|---|---|"]
     for r in rows:
+        if r.get("fatal"):
+            L.append(f"| {r['label']} | 无法验收 | — | — | — | {r['fatal']} |")
+            continue
         if r.get("skipped"):
             state = "带戳，缺 2022+ 内核" if r.get("need_kernel") else "干净"
             L.append(f"| {r['label']} | {state} | — | — | {r['size_before'] // 1024} | 跳过 |")
@@ -915,7 +983,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--purge-rounds", type=int, default=3)
     ap.add_argument("--force", action="store_true", help="deedu 时即使未检出也强制走一遍往返")
-    ap.add_argument("--no-clean", action="store_true", help="repair 时只做 AUDIT/PURGE/OVERKILL")
+    ap.add_argument("--no-clean", action="store_true", help="只做 AUDIT/PURGE，不删除零长线和空文字")
     ap.add_argument("--no-audit", action="store_true", help="edustrip 时只另存，不跑 AUDIT")
     ap.add_argument("--verify", choices=["print", "none"], default="print",
                     help="edustrip 的验收方式：print=前后各打一次图（默认，唯一可信），"
@@ -991,7 +1059,7 @@ def main():
         bad = len(rows) - ok - skip - need
         print(f"\n{'=' * 58}\n合计 {len(rows)} 张：已去戳 {ok}，本来就干净 {skip}，"
               f"带戳待装内核 {need}，失败 {bad}\n报告：{rep}")
-        if bad:
+        if bad or need:
             sys.exit(f"\n{bad} 张处理失败，见上方错误信息")
         return
 
@@ -1024,28 +1092,32 @@ def main():
 
     do_repair = ns.mode in ("repair", "all")
     do_clean = (not ns.no_clean) and do_repair
-    seen: set = set()
+    ref_cache: dict = {}
     failed: list = []
     for i, dwg in enumerate(files):
         if len(files) > 1:
             print(f"\n### {dwg.name}", flush=True)
-        res = process_with_xrefs(dwg, outdir, do_repair, do_clean, ns.timeout,
+        drawing_out = outdir / f"{i + 1:04d}-{dwg.name}" if len(files) > 1 else outdir
+        res = process_with_xrefs(dwg, drawing_out, do_repair, do_clean, ns.timeout,
                                  ns.purge_rounds, with_xref=not ns.no_xref,
-                                 max_depth=ns.xref_depth, seen=seen)
-        (outdir / f"{dwg.stem}-report.json").write_text(
+                                 max_depth=ns.xref_depth, ref_cache=ref_cache,
+                                 ref_outdir=outdir / "外部参照")
+        (drawing_out / f"{dwg.stem}-report.json").write_text(
             json.dumps(res, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         print_summary(res["main"])
-        if res["main"].get("fatal"):
+        if res.get("bundle_warning"):
+            print("!! " + res["bundle_warning"])
+        if any(r.get("fatal") for r in [res["main"]] + res["refs"]):
             failed.append(dwg.name)
         if res["refs"]:
             ok = sum(1 for r in res["refs"] if not r.get("fatal"))
             print(f"参照：{len(res['refs'])} 个已处理（{ok} 个正常）"
                   + (f"，整包在 {res['bundle']}" if res.get("bundle") else ""))
-            print(f"清单：{outdir / (dwg.stem + '-外部参照清单.md')}")
+            print(f"清单：{drawing_out / (dwg.stem + '-外部参照清单.md')}")
         # 临时目录里是 DXF 中间件，一批图能堆几百 MB。产物都拷到 outdir 了，默认删掉。
         if not ns.keep_temp:
             for r in [res["main"]] + res["refs"]:
-                if r.get("work"):
+                if r.get("work") and not r.get("fatal"):
                     shutil.rmtree(str(r["work"]), ignore_errors=True)
 
     # 有文件没处理成功就返回非 0，否则批处理和 CI 判断不出成败

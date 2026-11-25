@@ -1,0 +1,4 @@
+interface:
+  display_name: "CAD 图纸医生"
+  short_description: "检查和修复 DWG 副本，生成图纸质量、外部参照及打印戳记报告"
+  default_prompt: "使用 $cad-dwg-doctor 检查这份 DWG，报告问题、参照缺失和可用的修复方案。"

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # 体检 / 修复 / 清理（dwgpipe.py audit|repair|all、batch_check.py）
 ezdxf>=1.0
 

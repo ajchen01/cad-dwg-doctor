@@ -1,0 +1,38 @@
+name: Validate skill
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install dependencies
+        run: python -X utf8 -m pip install -r requirements.txt
+      - name: Check dependency compatibility
+        run: python -m pip check
+      - name: Run regression tests
+        run: python -X utf8 -m unittest discover -s tests -v
+      - name: Compile scripts
+        run: python -m compileall -q scripts tests
+      - name: Build skill archive
+        run: python scripts/package_skill.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cad-dwg-doctor-python-${{ matrix.python }}
+          path: dist/cad-dwg-doctor.zip

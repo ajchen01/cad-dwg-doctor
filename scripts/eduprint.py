@@ -72,7 +72,7 @@ COMMON_SHX = ("hztxt.shx", "china.shx", "tssdchn.shx", "tssdeng.shx", "!hztxt.sh
               "hzfs.shx", "txt.shx", "simplex.shx", "romans.shx")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dwgpipe import find_acc  # noqa: E402  引擎发现只维护一份，别在这儿重复实现
+from dwgpipe import find_acc, _is_product, _new_workdir  # noqa: E402  引擎发现只维护一份，别在这儿重复实现
 
 
 def _render_deps():
@@ -188,7 +188,7 @@ def _plot(acc: str, dwg: Path, work: Path, pdf: Path, timeout: int) -> tuple[int
         '(setvar "CMDDIA" 0)\n'
         f'(vl-cmdf "_.-plot" "N" "" "" "DWG To PDF.pc3" "{pdf.as_posix()}" "N" "Y")\n'
         '(princ "\\n[MARK-PLOT-DONE]")\n'
-        '(_.QUIT)\n',
+        '(vl-cmdf "_.QUIT")\n',
         encoding="ascii",
     )
     env = dict(os.environ)
@@ -207,7 +207,7 @@ def _plot(acc: str, dwg: Path, work: Path, pdf: Path, timeout: int) -> tuple[int
 def check_one(acc: str, dwg: Path, outdir: Path, dpi: int, timeout: int,
               attach_from: Path | None = None) -> dict:
     # 工作目录必须是纯英文，accoreconsole 读脚本按本地 ANSI，中文路径会乱码
-    work = Path(tempfile.gettempdir()) / "eduprint" / f"{dwg.stem[:8]}_{int(time.time())}_{os.getpid()}"
+    work = _new_workdir("print_")
     work.mkdir(parents=True, exist_ok=True)
     res = {"input": str(dwg), "work": str(work)}
 
@@ -240,15 +240,27 @@ def check_one(acc: str, dwg: Path, outdir: Path, dpi: int, timeout: int,
                 except Exception:
                     pass
 
+    # OpenCV 缺失应返回可汇总的失败，而不是在整批中途抛出 ImportError。
+    try:
+        import cv2
+        import numpy
+    except ImportError as exc:
+        res["fatal"] = f"缺少打印分析依赖：{exc}；请安装 requirements.txt"
+        return res
     pdf = work / "out.pdf"
     rc, log = _plot(acc, staged, work, pdf, timeout)
+    (work / "plot.log").write_text(log, encoding="utf-8")
     res["rc"] = rc
-    if not pdf.exists():
+    if rc != 0 or not pdf.is_file():
         res["fatal"] = "未生成 PDF（打印失败）"
         res["log_tail"] = "\n".join(log.splitlines()[-6:])
         return res
 
-    stats, verdict = _edge_stats(pdf, dpi)
+    try:
+        stats, verdict = _edge_stats(pdf, dpi)
+    except Exception as exc:
+        res["fatal"] = f"PDF 渲染或分析失败：{exc}"
+        return res
     res["pdf"] = str(pdf)
     res["edges"] = {k: v["pct"] for k, v in stats.items()}   # 兼容老字段：只给百分比
     res["edge_stats"] = stats
@@ -275,8 +287,8 @@ def collect(paths: list[str]) -> list[Path]:
     for raw in paths:
         p = Path(raw)
         if p.is_dir():
-            out += sorted(x for x in p.rglob("*.dwg") if ".Attach" not in str(x).lower())
-        elif p.exists():
+            out += sorted(x for x in p.rglob("*.dwg") if x.is_file() and not _is_product(x) and not any(part.lower().endswith(".dwg.attach") for part in x.parts))
+        elif p.is_file() and p.suffix.lower() == ".dwg":
             out.append(p)
     return out
 
@@ -297,18 +309,20 @@ def main() -> None:
     if not files:
         raise SystemExit("没有找到 dwg")
     outdir = Path(ns.out) if ns.out else (files[0].parent / "eduprint")
+    outdir.mkdir(parents=True, exist_ok=True)
+    files = list(dict.fromkeys(f.resolve() for f in files))
     acc = find_acc(acc=ns.acc)
     print(f"打印内核：{acc}\n目标 {len(files)} 张，输出：{outdir}")
 
     rows = []
-    for f in files:
+    for index, f in enumerate(files, 1):
         print(f"\n… {f.name}", flush=True)
-        r = check_one(acc, f, outdir, ns.dpi, ns.timeout)
+        r = check_one(acc, f, outdir / f"{index:04d}-{f.stem}", ns.dpi, ns.timeout)
         rows.append(r)
         if r.get("fatal"):
             print(f"   ✗ {r['fatal']}")
         else:
-            tag = "带戳" if r["stamped"] else "干净"
+            tag = "疑似带戳" if r["stamped"] else "本次打印未检出"
             print(f"   → {tag}  {r['verdict']['reason']}  （最暗边 {r['worst_pct']}%）")
 
     ok = sum(1 for r in rows if not r.get("fatal") and r["stamped"])
@@ -337,12 +351,15 @@ def main() -> None:
         nc = "/".join(str(st[k]["ncomp"]) for k in ("top", "bottom", "left", "right")) if st else "—"
         L.append(f"| {Path(r['input']).name} | {e['top']} | {e['bottom']} | "
                  f"{e['left']} | {e['right']} | {nc} | "
-                 f"{'**带戳**' if r['stamped'] else '干净'} |")
+                 f"{'**疑似带戳**' if r['stamped'] else '本次打印未检出'} |")
     rep = outdir / "戳记判定-打印法.md"
     rep.write_text("\n".join(L), encoding="utf-8")
     (outdir / "eduprint.json").write_text(
         json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n{'=' * 52}\n合计 {len(rows)}：带戳 {ok}，干净 {clean}，失败 {bad}\n报告：{rep}")
+
+    if bad:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

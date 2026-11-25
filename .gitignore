@@ -42,3 +42,9 @@ educheck.json
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local release archives
+dist/
+
+# AutoCAD diagnostic logs
+acad.err

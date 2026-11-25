@@ -27,6 +27,8 @@ def collect(root: Path, recursive: bool) -> list[Path]:
     it = root.rglob("*.dwg") if recursive else root.glob("*.dwg")
     out = []
     for p in it:
+        if not p.is_file():
+            continue
         if not recursive and any(part.lower().endswith(".attach") for part in p.parts):
             continue
         # 本工具自己的产物不要再当原图扫一遍（顺手也会把目录里的历史副本排除掉）
@@ -50,19 +52,23 @@ def main():
 
     root = Path(ns.dir).resolve()
     outdir = Path(ns.out) if ns.out else root / "dwg-check"
-    files = collect(root, ns.recursive)
+    files = [p for p in collect(root, ns.recursive)
+             if outdir.resolve() == root or not p.resolve().is_relative_to(outdir.resolve())]
     if not files:
         raise SystemExit("没找到 dwg")
 
+    outdir.mkdir(parents=True, exist_ok=True)
     rows, xrows = [], []
-    seen: set = set()
+    ref_cache: dict = {}
     for p in files:
+        drawing_out = outdir / "主图" / p.relative_to(root)
         t0 = time.time()
         print(f"… {p.name}", flush=True)
         try:
-            res = process_with_xrefs(p, outdir, do_repair=ns.repair, do_clean=ns.repair,
+            res = process_with_xrefs(p, drawing_out, do_repair=ns.repair, do_clean=ns.repair,
                                      timeout=ns.timeout, with_xref=not ns.no_xref,
-                                     max_depth=ns.xref_depth, seen=seen)
+                                     max_depth=ns.xref_depth, ref_cache=ref_cache,
+                                     ref_outdir=outdir / "外部参照")
             r = res["main"]
         except Exception as exc:
             rows.append(dict(name=p.name, kb=p.stat().st_size // 1024, fatal=f"{type(exc).__name__}: {exc}"))
@@ -85,7 +91,7 @@ def main():
             rows.append(dict(name=p.name, kb=p.stat().st_size // 1024, fatal=r["fatal"]))
             if not ns.keep_temp:
                 for x in [r] + res["refs"]:
-                    if x.get("work"):
+                    if x.get("work") and not x.get("fatal"):
                         shutil.rmtree(str(x["work"]), ignore_errors=True)
             continue
         b = r["before"]
@@ -93,7 +99,8 @@ def main():
         top = [f"{f['title']}×{f['count']}" for f in b["findings"] if f["level"] != "info"][:3]
         rows.append(dict(
             name=p.name, kb=p.stat().st_size // 1024,
-            ver=b["stats"].get("dxf_version", ""),
+            ver=r.get("dwg_version_before", ""),
+            dwg_version_after=r.get("dwg_version_after"),
             layers=b["stats"].get("layers"), proxy=b["stats"].get("proxy"),
             err=b["counts"]["error"], warn=b["counts"]["warn"], info=b["counts"]["info"],
             err_after=a["counts"]["error"] if a else None,
@@ -105,7 +112,7 @@ def main():
         ))
         if not ns.keep_temp:
             for x in [r] + res["refs"]:
-                if x.get("work"):
+                if x.get("work") and not x.get("fatal"):
                     shutil.rmtree(str(x["work"]), ignore_errors=True)
 
     (outdir / "batch.json").write_text(json.dumps({"main": rows, "xref": xrows},
@@ -145,6 +152,8 @@ def main():
 
     (outdir / "总表.md").write_text("\n".join(L), encoding="utf-8")
     print("\n".join(L))
+    if any(r.get("fatal") for r in rows + xrows):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -129,21 +129,9 @@ class Auditor:
                 "若要交付通用图纸，需原插件「图形导出」成基本图元，不要用 DXF 往返（会丢对象）"))
 
     def rule_edu(self):
-        """教育版标记：EDU 图会在打印时带水印"""
-        hits = 0
-        try:
-            blob = open(self.path, "rb").read()
-            for tag in (b"EDU", b"\xbd\xcc\xd3\xfd\xb0\xe6"):
-                if tag in blob:
-                    hits += 1
-        except Exception:
-            pass
-        self.stats["edu"] = hits
-        if hits:
-            self.findings.append(Finding(
-                "F04", ERROR, "疑似教育版图纸",
-                1, "文件内含 EDU/教育版标记",
-                "教育版打印会带「教育版产品制作」水印，不能用于正式交付；需用正式版重存"))
+        """DXF 内容不能证明 DWG 的教育版打印标记。"""
+        self.stats["edu"] = None
+        self.stats["edu_check"] = "DXF 体检不判定教育版戳记；需单独打印检查并复核"
 
     def rule_layers(self):
         used = Counter()
