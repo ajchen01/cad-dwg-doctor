@@ -27,12 +27,12 @@
 
 ## 一句话，让整套图纸过一遍
 
-这是给 AI agent 使用的 **DWG 处理技能**，也可以直接通过 Python 命令调用。本机 AutoCAD 负责读写图纸，技能负责串起检查、修复、参照处理和验收报告。
+把图纸医生安装到支持技能和本地脚本执行的 AI 助手中，就能用中文提出处理需求。本机 AutoCAD 负责读写图纸，技能负责串起检查、修复、参照处理和验收报告。
 
 安装后，可以直接这样说：
 
 ```text
-使用 $cad-dwg-doctor 体检这张主图及全部参照，不覆盖原文件。
+帮我检查这套图纸，保留原文件。图纸位置：D:\项目图纸\主图.dwg
 
 修复并清理这套 DWG，保持每份图纸的原版本，给我前后对比。
 
@@ -80,48 +80,47 @@
 
 <a id="install"></a>
 
-## 装上就能用
+## 第一次使用，从这里开始
 
-### 1. 放入技能目录
+首次接触这类工具，可以考虑 **WorkBuddy**。图纸医生保持通用技能形式，使用的助手需要支持技能加载、本地文件访问和脚本执行；各工具兼容性需实际验证。
 
-从 [GitHub Releases](https://github.com/ajchen01/cad-dwg-doctor/releases) 下载 `cad-dwg-doctor.zip`，解压后将整个 `cad-dwg-doctor` 文件夹放入 agent 的技能目录。
+### 1. 添加图纸医生
 
-Codex 默认技能目录的 Windows 安装示例：
+从 [GitHub Releases](https://github.com/ajchen01/cad-dwg-doctor/releases) 下载 `cad-dwg-doctor.zip`，解压后将完整文件夹添加到你使用的助手中。保留脚本和参考资料，**不要只复制 `SKILL.md`**。具体导入入口或技能目录以所用工具说明为准。
 
-```text
-%USERPROFILE%\.codex\skills\cad-dwg-doctor\
-```
+### 2. 让助手检查运行环境
 
-**保留整个文件夹，不要只复制 `SKILL.md`。** 脚本、参考资料及依赖文件必须一起安装。
+复制这句话：
+
+> 请使用图纸医生，检查这台电脑能不能处理 DWG。先不要修改图纸；缺少运行组件时，帮我准备技能专用环境，并说明检查结果。
+
+技能提供只读环境检查脚本，检查 Windows、Python、所需依赖和 AutoCAD 引擎。依赖可由助手协助准备；AutoCAD 需要你自行安装并激活。检查通过不代表已完成实际图纸验收。
+
+### 3. 提供图纸位置，说出需求
+
+> 请修复清理 D:\项目图纸\主图.dwg，包括全部外部参照。保留原文件，保持每份 DWG 的原版本，完成后告诉我成品和报告在哪里。
+
+提供本地主图路径或完整图纸文件夹，保留原参照结构。默认输出副本；只有明确要求覆盖，才会逐份验证备份并替换。
+
+完整说明、常见问题和结果示例见 **[第一次使用指南](references/getting-started.md)**。
 
 <details>
-<summary>也可以用 Git 安装</summary>
+<summary>手动安装与环境检查（熟悉命令行的用户）</summary>
 
-```powershell
-git clone https://github.com/ajchen01/cad-dwg-doctor.git "$env:USERPROFILE\.codex\skills\cad-dwg-doctor"
-```
+Codex 默认目录示例：`%USERPROFILE%\.codex\skills\cad-dwg-doctor\`。其他工具使用各自规定的目录。
 
-如果宿主配置了其他技能目录，使用该目录即可。
-
-</details>
-
-### 2. 安装 Python 依赖
-
-在安装后的技能目录运行：
+在技能目录执行，或让助手使用技能专用虚拟环境：
 
 ```powershell
 python -X utf8 -m pip install -r requirements.txt
+python -X utf8 scripts/check_environment.py
+# 打印与清戳需额外检查依赖及引擎版本
+python -X utf8 scripts/check_environment.py --mode strip --json
 ```
 
-### 3. 确认 AutoCAD 引擎
+非标准 AutoCAD 安装位置可用 `--acc` 或 `ACCORECONSOLE` 指定；清戳引擎使用处理入口的 `--strip-acc`。环境检查不启动 AutoCAD，不验证激活或实际打印结果。
 
-脚本自动查找 `accoreconsole.exe`。非标准安装路径可以明确指定：
-
-```powershell
-python scripts/dwgpipe.py audit "D:\图纸\主图.dwg" --acc "D:\AutoCAD 2020\accoreconsole.exe"
-```
-
-也可以设置环境变量 `ACCORECONSOLE`。清戳引擎可通过 `--strip-acc` 指定，需 AutoCAD 2022+。
+</details>
 
 <a id="commands"></a>
 
